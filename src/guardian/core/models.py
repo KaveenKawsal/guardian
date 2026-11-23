@@ -242,6 +242,8 @@ class EvidenceKind(StrEnum):
     SOURCE_LOCATION = "source-location"
     GIT_CHANGE = "git-change"
     REPOSITORY_CONFIG = "repository-config"
+    CODE_USAGE = "code-usage"
+    """Where the repository's own source imports or calls into a component (phase 4)."""
 
 
 class Evidence(_Frozen):

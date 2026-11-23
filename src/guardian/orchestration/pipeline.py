@@ -1,14 +1,17 @@
 """Deterministic scan pipeline.
 
     profile -> SBOM (cdxgen) -> CycloneDX normalization
-            -> [ OSV-Scanner | Semgrep | git change analysis ]   (concurrent)
-            -> git blame for code findings -> knowledge graph -> persist
+            -> [ OSV-Scanner | Semgrep | git change analysis ]   (concurrent, thread pool)
+               + source indexing (Tree-sitter)                   (main thread, meanwhile)
+            -> git blame for code findings -> code-context enrichment
+            -> knowledge graph -> persist
 
 Every analysis step degrades to a warning plus a recorded tool run, so a missing or failing
 tool yields a PARTIAL scan instead of no scan. Phase 5 wraps these steps as LangGraph nodes.
 """
 
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +29,7 @@ from guardian.core.config import GuardianSettings
 from guardian.core.exceptions import GuardianError
 from guardian.core.models import (
     ChangeRecord,
+    CodeIndex,
     Finding,
     RepositoryProfile,
     Sbom,
@@ -37,11 +41,14 @@ from guardian.core.profiler import RepositoryProfiler
 from guardian.execution.policies import ExecutionPolicy
 from guardian.execution.results import ToolStatus
 from guardian.execution.runner import ToolRunner
+from guardian.indexing.enrichment import add_usage_evidence, attach_symbols
+from guardian.indexing.repository_indexer import EXTRACT_ERROR, RepositoryIndexer
 from guardian.knowledge.graph_builder import build_knowledge_graph
 from guardian.knowledge.graph_queries import DependencyGraph
 from guardian.storage.database import Database
 
 _OK_STATUSES = frozenset({ToolStatus.SUCCESS.value, ToolStatus.SKIPPED.value})
+INDEXER = "indexer"
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,8 @@ class ScanOutcome:
     graph: DependencyGraph
     findings: list[Finding] = field(default_factory=list)
     changes: list[ChangeRecord] = field(default_factory=list)
+    code_index: CodeIndex | None = None
+    """None when indexing was disabled, found no source files or failed."""
 
 
 @dataclass
@@ -75,6 +84,7 @@ class ScanPipeline:
         osv_scanner: OsvScanner | None = None,
         semgrep_scanner: SemgrepScanner | None = None,
         change_analyzer: ChangeAnalyzer | None = None,
+        indexer: RepositoryIndexer | None = None,
     ) -> None:
         self.db = db
         self.settings = s = settings or GuardianSettings()
@@ -90,6 +100,9 @@ class ScanPipeline:
             runner, configs=s.semgrep_configs, rule_timeout_seconds=s.semgrep_rule_timeout_seconds
         )
         self.change_analyzer = change_analyzer or ChangeAnalyzer(runner, s.change_history_commits)
+        # The cache reads/writes through the SQLite connection, so indexing stays on the
+        # thread that created ``db`` (the caller's thread).
+        self.indexer = indexer or RepositoryIndexer(s, cache=db.code.cache())
 
     def run(self, path: Path) -> ScanOutcome:
         started = datetime.now(UTC)
@@ -105,9 +118,13 @@ class ScanPipeline:
             sbom, raw = self._dependency_stage(profile, log)
             if sbom is not None:
                 self.db.sboms.save(scan_id, sbom, raw)
-            findings, changes = self._security_stage(profile, sbom, raw, log)
+            findings, changes, code_index = self._security_stage(profile, sbom, raw, log)
+            if code_index is not None:
+                self.db.code.save(scan_id, code_index)
             self.db.findings.save(scan_id, findings, changes)
-            graph = DependencyGraph(build_knowledge_graph(profile, sbom, findings, changes))
+            graph = DependencyGraph(
+                build_knowledge_graph(profile, sbom, findings, changes, code_index=code_index)
+            )
         except BaseException:
             self._finish(scan_id, ScanStatus.FAILED, log, component_count=0, finding_count=0)
             raise
@@ -129,6 +146,7 @@ class ScanPipeline:
             graph=graph,
             findings=findings,
             changes=changes,
+            code_index=code_index,
         )
 
     def _finish(
@@ -205,7 +223,7 @@ class ScanPipeline:
         sbom: Sbom | None,
         raw_sbom: bytes | None,
         log: _StepLog,
-    ) -> tuple[list[Finding], list[ChangeRecord]]:
+    ) -> tuple[list[Finding], list[ChangeRecord], CodeIndex | None]:
         root = Path(profile.root)
         excluded = self.settings.excluded_dirs
         with tempfile.TemporaryDirectory(prefix="guardian-scan-") as tmp:
@@ -223,8 +241,10 @@ class ScanPipeline:
                 GIT: lambda: self.change_analyzer.analyze(profile),
             }
             # The analyzers are independent subprocess-bound tools, so they run concurrently.
+            # Indexing runs meanwhile on this thread: its cache uses the SQLite connection.
             with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
                 futures = {name: pool.submit(task) for name, task in tasks.items()}
+                code_index, index_run, index_warnings = self._index_stage(profile, sbom)
                 results = {
                     name: _result_or_error(name, future.result) for name, future in futures.items()
                 }
@@ -235,6 +255,8 @@ class ScanPipeline:
             log.absorb(result)
             findings += result.findings
             changes += result.changes
+        log.tool_runs.append(index_run)
+        log.warnings += index_warnings
 
         git_ran = results[GIT].tool_run.status == ToolStatus.SUCCESS.value
         if git_ran and self.settings.max_blamed_findings:
@@ -244,9 +266,46 @@ class ScanPipeline:
             known = {c.commit for c in changes}
             changes += [c for c in blamed if c.commit not in known]
 
+        if code_index is not None:
+            findings = add_usage_evidence(attach_symbols(findings, code_index), code_index)
+
         unique = {f.id: f for f in findings}
         ordered = sorted(unique.values(), key=lambda f: (-f.severity.rank, f.kind, f.title))
-        return ordered, changes
+        return ordered, changes, code_index
+
+    # --- codebase understanding --------------------------------------------------------
+
+    def _index_stage(
+        self, profile: RepositoryProfile, sbom: Sbom | None
+    ) -> tuple[CodeIndex | None, ToolRunSummary, list[str]]:
+        """Index the source. Returns the index (None unless it has files), the tool run and
+        warnings. Never raises for indexer bugs: the scan continues without an index."""
+        if not self.settings.index_source:
+            reason = "Source indexing disabled (index_source=false)"
+            return None, _index_run(ToolStatus.SKIPPED, 0.0, reason), []
+        started = time.monotonic()
+        try:
+            index = self.indexer.index(profile, sbom)
+        except Exception as exc:  # noqa: BLE001 - a partial scan beats no scan
+            elapsed = time.monotonic() - started
+            message = f"{type(exc).__name__}: {exc}"
+            warning = f"Source indexing failed; continuing without a code index ({message})"
+            return None, _index_run(ToolStatus.ERROR, elapsed, message), [warning]
+        elapsed = time.monotonic() - started
+
+        warnings = list(index.warnings)
+        if failed := index.skipped_files.get(EXTRACT_ERROR, 0):
+            warnings.append(f"Source indexing: {failed} file(s) could not be parsed")
+        if not index.files:
+            run = _index_run(ToolStatus.SKIPPED, elapsed, "No supported source files indexed")
+            return None, run, warnings
+        return index, _index_run(ToolStatus.SUCCESS, elapsed), warnings
+
+
+def _index_run(status: ToolStatus, elapsed: float, error: str | None = None) -> ToolRunSummary:
+    return ToolRunSummary(
+        tool=INDEXER, status=status.value, duration_seconds=round(elapsed, 3), error=error
+    )
 
 
 def _result_or_error(name: str, get: Callable[[], AnalysisResult]) -> AnalysisResult:

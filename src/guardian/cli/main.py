@@ -5,6 +5,8 @@ from typing import Annotated
 import typer
 
 from guardian import __version__
+from guardian.cli.ai import ai_app
+from guardian.cli.code import code
 from guardian.cli.deps import deps
 from guardian.cli.doctor import doctor
 from guardian.cli.findings import explain, findings
@@ -42,6 +44,8 @@ app.command()(findings)
 app.command()(explain)
 app.command()(history)
 app.command()(deps)
+app.command()(code)
 app.command()(graph)
 app.command()(profile)
 app.command()(doctor)
+app.add_typer(ai_app)

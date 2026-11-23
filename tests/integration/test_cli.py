@@ -204,3 +204,153 @@ def test_graph_export(isolated, make_repo, tmp_path):
 def test_graph_without_sbom(isolated, make_repo, tmp_path):
     cli.invoke(app, ["scan", str(make_repo({"main.go": ""}))])
     assert cli.invoke(app, ["graph", "-o", str(tmp_path / "g")]).exit_code == 1
+
+
+# --- code (phase 4) --------------------------------------------------------------------
+
+CODE_REPO = {
+    "package.json": '{"main": "app.js", "dependencies": {"express": "4", "lodash": "4"}}',
+    "app.js": (
+        "function run(a) {\n"
+        "  return _.template(a);\n"
+        "}\n"
+        'const _ = require("lodash");\n'
+        'const express = require("express");\n'
+        "const app = express();\n"
+        'app.get("/x", run);\n'
+        "app.listen(3000);\n"
+    ),
+}
+
+
+def test_scan_shows_code_and_code_commands(isolated, make_repo):
+    root = make_repo(CODE_REPO)
+    scan = cli.invoke(app, ["scan", str(root)])
+    assert scan.exit_code == 0, scan.output
+    assert "1 files indexed" in scan.stdout
+    assert "2 external packages imported" in scan.stdout
+    assert "indexer: success" in scan.stdout
+
+    summary = cli.invoke(app, ["code"])
+    assert summary.exit_code == 0, summary.output
+    assert "Files: 1 (1 javascript)" in summary.stdout
+    assert "Most imported external packages" in summary.stdout
+    assert "lodash" in summary.stdout
+
+    as_json = json.loads(cli.invoke(app, ["code", "latest", "--json"]).stdout)
+    assert as_json["files"] == 1
+    assert as_json["external_packages"] == {"express": 1, "lodash": 1}
+    assert as_json["entry_points_by_kind"]["http-route"] == 1
+
+    uses = cli.invoke(app, ["code", "--uses", "LoDash"])
+    assert uses.exit_code == 0, uses.output
+    assert "app.js:4" in uses.stdout
+    assert "template" in uses.stdout
+    uses_json = json.loads(cli.invoke(app, ["code", "--uses", "lodash", "--json"]).stdout)
+    assert [i["line"] for i in uses_json["imports"]] == [4]
+    assert uses_json["members"] == {"template": 1}
+    none = cli.invoke(app, ["code", "--uses", "left-pad"])
+    assert none.exit_code == 0
+    assert "does not import" in none.stdout
+
+    entries = cli.invoke(app, ["code", "--entry-points"])
+    assert entries.exit_code == 0, entries.output
+    assert "GET /x" in entries.stdout
+    assert "server-listen" in entries.stdout
+    entries_json = json.loads(cli.invoke(app, ["code", "--entry-points", "--json"]).stdout)
+    assert {e["kind"] for e in entries_json} >= {"http-route", "server-listen", "package-main"}
+
+    explained = cli.invoke(app, ["explain", "code0000"])
+    assert "Symbol: app.js::run" in explained.stdout
+    vuln = next(
+        f
+        for f in json.loads(cli.invoke(app, ["findings", "--json"]).stdout)
+        if f["details"].get("vulnerability_id") == "CVE-2021-23337"
+    )
+    explained = cli.invoke(app, ["explain", vuln["id"]])
+    assert "[code-usage] Imported in 1 file(s): app.js:4; calls: template (1)" in (explained.stdout)
+
+
+def test_scan_json_has_code_counts(isolated, make_repo):
+    data = json.loads(cli.invoke(app, ["scan", str(make_repo(CODE_REPO)), "--json"]).stdout)
+    assert data["code"]["files"] == 1
+    assert data["code"]["symbols"] == 1
+    assert "imports" not in data["code"] or isinstance(data["code"]["imports"], int)
+
+
+def test_code_without_index(isolated, make_repo):
+    root = make_repo({"package.json": "{}"})
+    data = json.loads(cli.invoke(app, ["scan", str(root), "--json"]).stdout)
+    assert data["code"] is None
+    result = cli.invoke(app, ["code"])
+    assert result.exit_code == 1
+    assert "no code index" in result.output
+
+
+def test_code_output_escapes_repository_text(isolated, make_repo):
+    from guardian.core.config import GuardianSettings
+    from guardian.core.models import (
+        CodeIndex,
+        EntryPoint,
+        EntryPointKind,
+        FileIndex,
+        ImportStyle,
+        ImportTarget,
+        ResolvedCall,
+        ResolvedImport,
+        SourceLanguage,
+    )
+    from guardian.storage.database import Database
+
+    cli.invoke(app, ["scan", str(make_repo({"package.json": "{}"}))])
+    evil = "[red]evil[/red]"
+    index = CodeIndex(
+        files=[
+            FileIndex(
+                path="[b]a[/b].js",
+                language=SourceLanguage.JAVASCRIPT,
+                sha256="0",
+                size=1,
+                line_count=1,
+            )
+        ],
+        imports=[
+            ResolvedImport(
+                path="[b]a[/b].js",
+                line=1,
+                module=evil,
+                style=ImportStyle.ES,
+                target=ImportTarget.EXTERNAL,
+                package=evil,
+            )
+        ],
+        calls=[
+            ResolvedCall(
+                path="[b]a[/b].js",
+                line=2,
+                callee="x.[i]m[/i]",
+                caller_id="[b]a[/b].js::[u]f[/u]",
+                package=evil,
+                member="[i]m[/i]",
+            )
+        ],
+        entry_points=[
+            EntryPoint(
+                path="[b]a[/b].js",
+                line=3,
+                kind=EntryPointKind.HTTP_ROUTE,
+                detail="GET /[blink]x[/blink]",
+            )
+        ],
+    )
+    with Database(GuardianSettings().database_path) as db:
+        db.code.save(db.scans.resolve("latest"), index)
+
+    summary = cli.invoke(app, ["code"])
+    assert evil in summary.stdout
+    uses = cli.invoke(app, ["code", "--uses", evil])
+    assert uses.exit_code == 0, uses.output
+    for text in (evil, "[b]a[/b].js:1", "[i]m[/i]", "[u]f[/u]"):
+        assert text in uses.stdout
+    entries = cli.invoke(app, ["code", "--entry-points"])
+    assert "GET /[blink]x[/blink]" in entries.stdout

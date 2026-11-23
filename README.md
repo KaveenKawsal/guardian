@@ -4,10 +4,10 @@ AI-powered repository security intelligence. Guardian combines deterministic sec
 scanners, codebase understanding, dependency and code knowledge graphs, and specialised AI
 investigators to identify, contextualise, prioritise and explain security risks.
 
-> Status: **Phase 3 (Security detection)** complete: dependency intelligence plus known
+> Status: **Phase 4 (Codebase understanding)** complete: dependency intelligence, known
 > vulnerabilities (OSV-Scanner), insecure code patterns (Semgrep), security-relevant git
-> changes, evidence records and an interactive dependency graph. Next: phase 4, codebase
-> understanding with Tree-sitter.
+> changes, evidence records, an interactive dependency graph, and a Tree-sitter index of the
+> repository's own source that puts findings in code context. Next: phase 5, AI investigation.
 
 ## Quick start
 
@@ -21,6 +21,9 @@ uv tool install semgrep                      # static analysis
 # Every tool is optional: a missing one makes the scan "partial" instead of failing it.
 
 uv run guardian scan ./my-project            # profile + SBOM + dependency graph, stored in ~/.guardian
+uv run guardian scan https://github.com/juice-shop/juice-shop   # clone a public HTTPS repo, then scan it
+uv run guardian scan juice-shop/juice-shop --ref v17.0.0        # GitHub shorthand, branch or tag
+uv run guardian scan                         # in a terminal: prompts for a URL or local path
 uv run guardian findings                     # security findings of the latest scan, worst first
 uv run guardian findings -k code -s high     # filter by kind and minimum severity
 uv run guardian explain <finding-id>         # facts, evidence chain, how it enters, remediation
@@ -28,10 +31,42 @@ uv run guardian graph -o graph/              # interactive dependency graph (ope
 uv run guardian deps                         # direct dependencies of the latest scan
 uv run guardian deps --all                   # every component, with depth and declaring manifest
 uv run guardian deps --why mime-db           # how a package entered the dependency tree
+uv run guardian code                         # codebase index: files, symbols, imports, entry points
+uv run guardian code --uses lodash           # where the source imports and calls a package
+uv run guardian code --entry-points          # routes, servers, main guards, package entry points
 uv run guardian history                      # previous scans
 uv run guardian profile ./my-project --json  # profile only, no storage
 uv run guardian doctor                       # check external tools
 ```
+
+### AI providers (Groq or Google Gemini)
+
+AI investigation (phase 5) uses your own API key; deterministic analysis works without one.
+Copy `.env.example` to `.env` (git-ignored) or `~/.guardian/.env` (works from any directory)
+and paste your keys:
+
+```bash
+GROQ_API_KEY=...      # https://console.groq.com/keys
+GOOGLE_API_KEY=...    # https://aistudio.google.com/apikey (GEMINI_API_KEY also works)
+```
+
+```bash
+uv run guardian ai status                    # which keys are set (masked) and the active model
+uv run guardian ai models                    # live model list from the active provider
+uv run guardian ai test                      # one tiny round-trip to confirm the key works
+uv run guardian ai use google --model gemini-2.5-pro   # switch provider and/or model
+```
+
+Keys are never printed, stored in Guardian's database, or passed to scanner subprocesses.
+
+Remote targets are cloned (shallow, no submodules, no hooks, symlinks checked out as plain
+files, HTTPS only) into `~/.guardian/workspaces/<hash>/<repo>`; the same repository always
+lands in the same directory, so `guardian history` groups its scans. The clone is kept so
+`guardian explain` and `guardian code` can read files later; pass `--no-keep` to delete it
+after the scan. `http://`, `ssh://`, `git@`, `file://`, `ext::` and URLs with embedded
+credentials are rejected. Repositories without a lockfile (e.g. OWASP Juice Shop) give a
+shallow dependency graph: generate one yourself with
+`npm install --package-lock-only --ignore-scripts`; Guardian never runs package managers.
 
 ## Development
 
@@ -46,7 +81,7 @@ uv run ty check src
 
 | Package | Responsibility |
 |---|---|
-| `guardian.cli` | Typer commands (`scan`, `findings`, `explain`, `graph`, `deps`, `history`, `profile`, `doctor`) |
+| `guardian.cli` | Typer commands (`scan`, `findings`, `explain`, `graph`, `deps`, `code`, `history`, `profile`, `doctor`) |
 | `guardian.core` | Settings, Pydantic models, profiler, adapter registry, exceptions |
 | `guardian.adapters` | Ecosystem detection: Python, Node.js, Java, containers |
 | `guardian.execution` | Sandboxed external tool runner and execution policies |
@@ -106,6 +141,31 @@ that established it, and evidence records:
 Deterministic tools establish these facts. Phase 5 adds AI investigation of relevance,
 reachability and exploitability on top.
 
+## Codebase understanding
+
+Every scan indexes the repository's own source with Tree-sitter (no code is imported or
+executed), alongside the security scanners:
+
+- **What is indexed**: Python, JavaScript, TypeScript and TSX files: symbols (classes,
+  functions, methods with their spans), imports (`import`/`from`, ES modules, `require`,
+  dynamic imports), call sites, and entry points (`__main__` guards, `__main__.py`,
+  `package.json` main/bin, `[project.scripts]`, HTTP routes, server `listen`/`run` calls).
+- **Resolution**: imports resolve to repository files, the standard library / Node built-ins,
+  or third-party packages matched to the exact SBOM component; calls resolve to internal
+  symbols or to members of those packages (e.g. `lodash.template`).
+- **Incremental**: per-file results are cached by content hash in the Guardian database, so
+  rescanning a repository only re-parses changed files. Oversized, minified and unreadable
+  files are skipped and counted; limits are `max_source_bytes` and `max_indexed_files`, and
+  `index_source=false` disables indexing.
+- **Code context on findings**: code findings name the innermost enclosing symbol
+  (`guardian explain` shows `Symbol: app/api.py::UserService.login`), and vulnerability
+  findings gain `code-usage` evidence: the files and lines importing the vulnerable package and
+  the members called (`Imported in 2 file(s): src/a.ts:3, src/b.ts:9; calls: template (2)`),
+  or that the source does not import it directly.
+
+An indexing failure never fails the scan: it is recorded as an errored `indexer` run and the
+scan is marked partial.
+
 ## Roadmap
 
 | Phase | Scope | Status |
@@ -113,6 +173,6 @@ reachability and exploitability on top.
 | 1. Foundation | CLI, repository profiler, adapters, safe tool execution | Done |
 | 2. Dependency intelligence | cdxgen SBOM, CycloneDX parsing, dependency graph, SQLite history | Done |
 | 3. Security detection | OSV-Scanner, Semgrep, git change analysis, evidence, graph view | Done |
-| 4. Codebase understanding | Tree-sitter symbols, imports, calls, entry points, code retrieval | In progress |
+| 4. Codebase understanding | Tree-sitter symbols, imports, calls, entry points, code retrieval | Done |
 | 5. AI investigation | LangGraph specialist agents, evidence correlation, risk scoring | Planned |
 | 6. Incremental scanning and demo | Scan comparison, JSON/HTML reports, demo scenarios | Planned |

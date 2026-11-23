@@ -179,6 +179,8 @@ def _explain_vulnerability(d: VulnerabilityDetails, paths: list[list[str]]) -> N
 
 def _explain_code(finding: Finding, d: CodeDetails) -> None:
     console.print(f"Location: {finding.location}", markup=False)
+    if finding.symbol_id:
+        console.print(f"Symbol: {finding.symbol_id}", markup=False)
     console.print(f"Rule: {d.rule_id}", markup=False)
     if d.cwe_ids:
         console.print(f"Weakness: {', '.join(d.cwe_ids)}", markup=False)

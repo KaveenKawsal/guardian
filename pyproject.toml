@@ -8,6 +8,9 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "httpx>=0.28.1",
+    "langchain-google-genai>=4.5.2",
+    "langchain-groq>=1.2.1",
     "networkx>=3.6.1",
     "packageurl-python>=0.17.6",
     "pydantic>=2.7",

@@ -9,8 +9,8 @@ from itertools import islice, takewhile
 import networkx as nx
 
 from guardian.adapters.base import normalize_package_name
-from guardian.core.models import ChangeRecord, Component, Finding, NodeType, Relation
-from guardian.knowledge.graph_builder import component_node, finding_node
+from guardian.core.models import ChangeRecord, Component, Finding, NodeType, Relation, Symbol
+from guardian.knowledge.graph_builder import component_node, finding_node, symbol_node
 
 
 class DependencyGraph:
@@ -124,3 +124,64 @@ class DependencyGraph:
             return nx.shortest_path_length(self._deps, self.root, component_node(ref))
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return None
+
+    # --- Code layer (phase 4) ------------------------------------------------------------
+    #
+    # Callers/callees are reported as symbol ids for symbol nodes and as graph node ids
+    # (``file:<path>`` for module-level code, ``component:<ref>`` for packages) otherwise.
+
+    def symbol(self, symbol_id: str) -> Symbol | None:
+        data = self.graph.nodes.get(symbol_node(symbol_id))
+        return data.get("symbol") if data else None
+
+    def importers_of(self, component_ref: str) -> list[str]:
+        """Repository-relative paths of the files that import the component."""
+        return sorted(
+            self.graph.nodes[n]["path"]
+            for n in self._related(component_node(component_ref), Relation.IMPORTS, incoming=True)
+        )
+
+    def callers_into(self, component_ref: str) -> list[tuple[str, list[str]]]:
+        """(caller, members called) for every symbol or file that calls into the component."""
+        node = component_node(component_ref)
+        if not self.graph.has_node(node):
+            return []
+        return sorted(
+            (self._code_id(source), list(data.get("members", [])))
+            for source, _, data in self.graph.in_edges(node, data=True)
+            if data["relation"] is Relation.CALLS
+        )
+
+    def is_imported(self, component_ref: str) -> bool:
+        """True when any file imports or calls into the component."""
+        node = component_node(component_ref)
+        return bool(
+            self._related(node, Relation.IMPORTS, incoming=True)
+            or self._related(node, Relation.CALLS, incoming=True)
+        )
+
+    def callers_of_symbol(self, symbol_id: str) -> list[str]:
+        node = symbol_node(symbol_id)
+        return sorted(self._code_id(n) for n in self._related(node, Relation.CALLS, incoming=True))
+
+    def callees_of_symbol(self, symbol_id: str) -> list[str]:
+        node = symbol_node(symbol_id)
+        return sorted(self._code_id(n) for n in self._related(node, Relation.CALLS, incoming=False))
+
+    def _related(self, node: str, relation: Relation, *, incoming: bool) -> list[str]:
+        if not self.graph.has_node(node):
+            return []
+        edges = (
+            self.graph.in_edges(node, data=True)
+            if incoming
+            else self.graph.out_edges(node, data=True)
+        )
+        return [
+            (source if incoming else target)
+            for source, target, data in edges
+            if data["relation"] is relation
+        ]
+
+    def _code_id(self, node: str) -> str:
+        symbol = self.graph.nodes[node].get("symbol")
+        return symbol.id if symbol is not None else node

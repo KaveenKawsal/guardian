@@ -1,4 +1,5 @@
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,14 @@ from guardian.analysis.osv import parse_osv_output
 from guardian.analysis.sbom import SbomGeneration, SbomGenerator
 from guardian.core.config import GuardianSettings
 from guardian.core.exceptions import RepositoryNotFoundError, UnsafeArgumentError
-from guardian.core.models import DirectSource, ScanStatus
+from guardian.core.models import (
+    CodeIndex,
+    DirectSource,
+    EvidenceKind,
+    FileIndex,
+    ScanStatus,
+    SourceLanguage,
+)
 from guardian.execution.results import ToolResult, ToolStatus
 from guardian.execution.runner import ToolRunner
 from guardian.orchestration.pipeline import ScanPipeline
@@ -228,3 +236,149 @@ def test_osv_is_skipped_without_manifests(db, settings, make_repo):
     )
     assert osv.calls == 0
     assert next(r for r in outcome.record.tool_runs if r.tool == "osv-scanner").status == "skipped"
+
+
+# --- codebase understanding (phase 4) --------------------------------------------------
+
+APP_JS = (
+    'const _ = require("lodash");\n'
+    'import express from "express";\n'
+    "function run(a) {\n"
+    "  return _.template(a);\n"
+    "}\n"
+    "_.merge({}, {});\n"
+    "const app = express();\n"
+    'app.get("/x", run);\n'
+    "app.listen(3000);\n"
+)
+
+
+class RecordingIndexer:
+    """Stands in for RepositoryIndexer; records the calling thread."""
+
+    def __init__(self, result):
+        self.result = result
+        self.threads = []
+
+    def index(self, profile, sbom):
+        self.threads.append(threading.current_thread())
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _indexer_run(outcome):
+    return next(r for r in outcome.record.tool_runs if r.tool == "indexer")
+
+
+def _osv_from_fixture():
+    class SbomAwareOsv(StubAnalyzer):
+        def scan(self, repo_root, work_dir, sbom, raw_sbom, excluded=frozenset()):
+            return analysis("osv-scanner", parse_osv_output(OSV_OUTPUT, sbom)[0])
+
+    return SbomAwareOsv(analysis("osv-scanner"))
+
+
+def test_code_index_is_stored_and_findings_are_enriched(db, settings, make_repo):
+    root = make_repo({**NODE_REPO, "app.js": APP_JS})
+    semgrep_hit = _code_finding().model_copy(update={"start_line": 4})
+    outcome = _pipeline(
+        db,
+        settings,
+        FixtureGenerator((FIXTURES / "node-express.cdx.json").read_bytes()),
+        osv_scanner=_osv_from_fixture(),
+        semgrep_scanner=StubAnalyzer(analysis("semgrep", [semgrep_hit])),
+    ).run(root)
+
+    assert outcome.record.status is ScanStatus.COMPLETED
+    assert _indexer_run(outcome).status == "success"
+    index = outcome.code_index
+    assert [f.path for f in index.files] == ["app.js"]
+    assert db.code.load(outcome.record.id) == index
+
+    saved = db.findings.load(outcome.record.id)
+    assert saved == outcome.findings
+    code = next(f for f in saved if f.id == "code0001")
+    assert code.symbol_id == "app.js::run"
+    lodash = [f for f in saved if f.component_ref == "pkg:npm/lodash@4.17.20"]
+    assert lodash
+    for finding in lodash:
+        usage = [e for e in finding.evidence if e.kind is EvidenceKind.CODE_USAGE]
+        assert len(usage) == 1
+        assert usage[0].summary == (
+            "Imported in 1 file(s): app.js:1; calls: merge (1), template (1)"
+        )
+        assert (usage[0].path, usage[0].line) == ("app.js", 1)
+
+
+def test_indexing_disabled_is_skipped(db, tmp_path, make_repo):
+    settings = GuardianSettings(_env_file=None, data_dir=tmp_path / "d", index_source=False)
+    indexer = RecordingIndexer(CodeIndex())
+    outcome = _pipeline(db, settings, FixtureGenerator(None), indexer=indexer).run(
+        make_repo({"app.js": APP_JS})
+    )
+    assert indexer.threads == []
+    assert _indexer_run(outcome).status == "skipped"
+    assert outcome.code_index is None
+    assert db.code.load(outcome.record.id) is None
+    assert outcome.record.status is ScanStatus.COMPLETED
+
+
+def test_no_source_files_is_skipped(db, settings, make_repo):
+    outcome = _pipeline(db, settings, FixtureGenerator(None)).run(make_repo({"main.go": ""}))
+    assert _indexer_run(outcome).status == "skipped"
+    assert outcome.code_index is None
+    assert db.code.load(outcome.record.id) is None
+
+
+def test_indexer_error_gives_partial_scan(db, settings, make_repo):
+    indexer = RecordingIndexer(RuntimeError("parser exploded"))
+    outcome = _pipeline(
+        db,
+        settings,
+        FixtureGenerator(None),
+        semgrep_scanner=StubAnalyzer(analysis("semgrep", [_code_finding()])),
+        indexer=indexer,
+    ).run(make_repo({"app.js": APP_JS}))
+    run = _indexer_run(outcome)
+    assert run.status == "error"
+    assert "parser exploded" in run.error
+    assert outcome.record.status is ScanStatus.PARTIAL
+    assert outcome.code_index is None
+    assert any("Source indexing failed" in w for w in outcome.record.warnings)
+    assert outcome.findings[0].symbol_id is None  # findings survive without enrichment
+
+
+def test_indexing_runs_on_the_main_thread_with_warnings(db, settings, make_repo):
+    file_index = FileIndex(
+        path="app.js", language=SourceLanguage.JAVASCRIPT, sha256="0", size=1, line_count=1
+    )
+    index = CodeIndex(
+        files=[file_index], skipped_files={"extract-error": 2}, warnings=["indexer said hi"]
+    )
+    indexer = RecordingIndexer(index)
+    outcome = _pipeline(db, settings, FixtureGenerator(None), indexer=indexer).run(
+        make_repo({"app.js": APP_JS})
+    )
+    assert indexer.threads == [threading.main_thread()]
+    assert _indexer_run(outcome).status == "success"
+    assert "indexer said hi" in outcome.record.warnings
+    assert "Source indexing: 2 file(s) could not be parsed" in outcome.record.warnings
+    assert db.code.load(outcome.record.id) == index
+
+
+def test_knowledge_graph_includes_the_code_layer(db, settings, make_repo):
+    """Integration of the pipeline (code index) with the graph code layer."""
+    root = make_repo(
+        {
+            **NODE_REPO,
+            "app.js": "const _ = require('lodash');\nfunction render(t) { return _.template(t); }\n",
+        }
+    )
+    raw = (FIXTURES / "node-express.cdx.json").read_bytes()
+    outcome = _pipeline(db, settings, FixtureGenerator(raw)).run(root)
+    lodash = outcome.graph.find("lodash")[0]
+    assert outcome.code_index is not None
+    assert outcome.graph.is_imported(lodash.ref)
+    assert outcome.graph.importers_of(lodash.ref) == ["app.js"]
+    assert outcome.graph.symbol("app.js::render") is not None
