@@ -1,0 +1,80 @@
+[project]
+name = "guardian"
+version = "0.1.0"
+description = "AI-powered repository security intelligence platform"
+readme = "README.md"
+authors = [
+    { email = "kaveenkawsal@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "networkx>=3.6.1",
+    "packageurl-python>=0.17.6",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "rich>=13",
+    "tree-sitter>=0.25",  # 0.25 introduced the QueryCursor API used by the indexer
+    "tree-sitter-javascript>=0.25.0",
+    "tree-sitter-python>=0.25.0",
+    "tree-sitter-typescript>=0.23.2",
+    "typer>=0.12",
+]
+
+[project.scripts]
+guardian = "guardian.cli.main:app"
+
+[build-system]
+requires = ["uv_build>=0.12.16,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [{ include-group = "lint" }, { include-group = "test" }]
+lint = [
+    "ruff>=0.17.6",
+    "ty>=0.0.108",
+]
+test = [
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".agents", ".claude"]  # third-party agent skills
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # docstring style enforced in review, not lint
+    "COM812",  # conflicts with formatter
+    "ISC001",  # conflicts with formatter
+    "TD002",   # TODO author
+    "TD003",   # TODO issue link
+    "FIX002",  # TODOs allowed
+    "S603",    # subprocess without shell is the point of execution/runner.py
+    "CPY001",  # no per-file copyright headers
+    "TC001",   # Pydantic resolves annotations at runtime; keep imports real
+    "TC002",
+    "TC003",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101", "S108", "S607", "S608", "PLR2004", "PLR0913", "PLR0917", "ANN", "INP001",
+    "ARG001", "ARG002", "ARG005", "FBT", "PLC0415", "E501",
+]
+"src/guardian/cli/**" = ["FBT001", "FBT002", "B008"]  # Typer option idioms
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--cov=guardian", "--cov-report=term-missing", "--cov-fail-under=80"]
+
+[tool.ty.environment]
+python-version = "3.11"

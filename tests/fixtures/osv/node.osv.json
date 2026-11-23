@@ -1,0 +1,81 @@
+{
+  "results": [
+    {
+      "source": {"path": "/tmp/work/guardian.cdx.json", "type": "sbom"},
+      "packages": [
+        {
+          "package": {"name": "lodash", "version": "4.17.20", "ecosystem": "npm", "purl": "pkg:npm/lodash@4.17.20?source=PUBLIC_REGISTRY"},
+          "groups": [
+            {"ids": ["GHSA-35jh-r3h4-6jhm"], "aliases": ["CVE-2021-23337", "GHSA-35jh-r3h4-6jhm"], "max_severity": "7.2"},
+            {"ids": ["GHSA-29mw-wpgm-hmr9"], "aliases": ["CVE-2020-28500", "GHSA-29mw-wpgm-hmr9"], "max_severity": "5.3"}
+          ],
+          "vulnerabilities": [
+            {
+              "id": "GHSA-35jh-r3h4-6jhm",
+              "aliases": ["CVE-2021-23337"],
+              "summary": "Command Injection in lodash",
+              "published": "2021-05-06T16:05:51Z",
+              "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H"}],
+              "database_specific": {"cwe_ids": ["CWE-77", "CWE-94"], "severity": "HIGH"},
+              "affected": [
+                {"package": {"name": "lodash", "ecosystem": "npm"},
+                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]},
+                {"package": {"name": "lodash-es", "ecosystem": "npm"},
+                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.99"}]}]}
+              ],
+              "references": [{"type": "ADVISORY", "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-23337"}]
+            },
+            {
+              "id": "GHSA-29mw-wpgm-hmr9",
+              "aliases": ["CVE-2020-28500"],
+              "summary": "Regular Expression Denial of Service (ReDoS) in lodash",
+              "database_specific": {"cwe_ids": ["CWE-1333"], "severity": "MODERATE"},
+              "affected": [
+                {"package": {"name": "lodash", "ecosystem": "npm"},
+                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "4.0.0"}, {"fixed": "4.17.21"}]}]}
+              ]
+            }
+          ]
+        },
+        {
+          "package": {"name": "path-to-regexp", "version": "0.1.7", "ecosystem": "npm", "purl": "pkg:npm/path-to-regexp@0.1.7"},
+          "groups": [{"ids": ["GHSA-9wv6-86v2-598j"], "aliases": ["CVE-2024-45296", "GHSA-9wv6-86v2-598j"], "max_severity": "7.5"}],
+          "vulnerabilities": [
+            {
+              "id": "GHSA-9wv6-86v2-598j",
+              "aliases": ["CVE-2024-45296"],
+              "summary": "path-to-regexp outputs backtracking regular expressions",
+              "affected": [
+                {"package": {"name": "path-to-regexp", "ecosystem": "npm"},
+                 "ranges": [{"type": "SEMVER", "events": [
+                   {"introduced": "0"}, {"fixed": "0.1.10"},
+                   {"introduced": "0.2.0"}, {"fixed": "1.9.0"},
+                   {"introduced": "2.0.0"}, {"fixed": "8.0.0"}
+                 ]}]}
+              ]
+            }
+          ]
+        },
+        {
+          "package": {"name": "cookie", "version": "0.4.0", "ecosystem": "npm"},
+          "groups": [{"ids": ["GHSA-pxg6-pf52-xh8x"], "aliases": ["CVE-2024-47764"], "max_severity": ""}],
+          "vulnerabilities": [
+            {
+              "id": "GHSA-pxg6-pf52-xh8x",
+              "aliases": ["CVE-2024-47764"],
+              "summary": "cookie accepts cookie name, path, and domain with out of bounds characters",
+              "database_specific": {"severity": "LOW"},
+              "affected": [{"package": {"name": "cookie", "ecosystem": "npm"},
+                            "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.7.0"}]}]}]
+            }
+          ]
+        },
+        {
+          "package": {"name": "left-pad", "version": "1.0.0", "ecosystem": "npm", "purl": "pkg:npm/left-pad@1.0.0"},
+          "groups": [{"ids": ["OSV-2099-1"], "aliases": []}],
+          "vulnerabilities": [{"id": "OSV-2099-1", "affected": []}]
+        }
+      ]
+    }
+  ]
+}

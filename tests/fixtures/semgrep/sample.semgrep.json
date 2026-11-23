@@ -1,0 +1,49 @@
+{
+  "version": "1.186.0",
+  "results": [
+    {
+      "check_id": "python.flask.security.injection.subprocess-injection.subprocess-injection",
+      "path": "app\\server.py",
+      "start": {"line": 3, "col": 12},
+      "end": {"line": 3, "col": 52},
+      "extra": {
+        "message": "Detected user input entering a `subprocess` call unsafely.",
+        "severity": "ERROR",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "metadata": {
+          "cwe": ["CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"],
+          "owasp": ["A03:2021 - Injection"],
+          "category": "security",
+          "confidence": "HIGH",
+          "likelihood": "HIGH",
+          "impact": "MEDIUM",
+          "references": ["https://semgrep.dev/docs/cheat-sheets/python-command-injection/"]
+        }
+      }
+    },
+    {
+      "check_id": "javascript.express.security.audit.xss.direct-response-write.direct-response-write",
+      "path": "./app/index.js",
+      "start": {"line": 1, "col": 1},
+      "end": {"line": 1, "col": 20},
+      "extra": {
+        "message": "Detected directly writing to a Response object.",
+        "severity": "WARNING",
+        "metadata": {"cwe": "CWE-79: Cross-site Scripting", "confidence": "medium"}
+      }
+    },
+    {
+      "check_id": "generic.secrets.gitleaks.generic-api-key",
+      "path": "config.txt",
+      "start": {"line": 1, "col": 1},
+      "end": {"line": 1, "col": 30},
+      "extra": {"message": "Generic API key detected", "severity": "INFO", "metadata": {}}
+    }
+  ],
+  "errors": [
+    {"type": ["PartialParsing", [{"path": "app/broken.js"}]], "level": "warn", "message": "partial"},
+    {"type": "Timeout", "level": "error", "message": "rule timed out"}
+  ],
+  "paths": {"scanned": ["app/server.py", "app/index.js", "config.txt"]}
+}

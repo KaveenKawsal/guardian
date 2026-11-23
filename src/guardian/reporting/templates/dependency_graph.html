@@ -1,0 +1,438 @@
+<title>__TITLE__</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: instrument-panel header of scan facts, then the graph canvas beside a package inspector. */
+:root {
+  --bg: #f3f5f7;
+  --surface: #ffffff;
+  --ink: #17202b;
+  --muted: #5b6878;
+  --line: #d5dce4;
+  --accent: #1f6f8b;
+  --edge: rgba(60, 80, 100, 0.16);
+  --edge-hot: rgba(31, 111, 139, 0.85);
+  --node: #9aa8b7;
+  --sev-critical: #b3123b;
+  --sev-high: #e0471d;
+  --sev-medium: #c98a00;
+  --sev-low: #3a7bd5;
+  --sev-unknown: #8a5cc2;
+  --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-head: "IBM Plex Sans Condensed", "IBM Plex Sans", "Arial Narrow", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f151c; --surface: #16202a; --ink: #e3e9ef; --muted: #93a2b3; --line: #273442;
+    --accent: #5fb4d1; --edge: rgba(160, 185, 210, 0.13); --edge-hot: rgba(95, 180, 209, 0.9);
+    --node: #5f7080; --sev-critical: #ff4d6d; --sev-high: #ff7a45; --sev-medium: #f2b632;
+    --sev-low: #6aa7ff; --sev-unknown: #b48cf0; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f151c; --surface: #16202a; --ink: #e3e9ef; --muted: #93a2b3; --line: #273442;
+  --accent: #5fb4d1; --edge: rgba(160, 185, 210, 0.13); --edge-hot: rgba(95, 180, 209, 0.9);
+  --node: #5f7080; --sev-critical: #ff4d6d; --sev-high: #ff7a45; --sev-medium: #f2b632;
+  --sev-low: #6aa7ff; --sev-unknown: #b48cf0; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-ui); font-size: 14px;
+  display: flex; flex-direction: column; gap: 12px;
+  padding-block: 14px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; }
+.eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--font-head); font-weight: 600; font-size: 26px; line-height: 1.1; margin: 2px 0 0; text-wrap: balance; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 0; }
+.facts div { display: flex; flex-direction: column; }
+.facts dt { font-size: 11px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.facts dd { margin: 0; font-family: var(--font-mono); font-size: 17px; font-variant-numeric: tabular-nums; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.views { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.views button { font: 500 13px var(--font-ui); color: var(--muted); background: none; border: 0; padding: 7px 12px; cursor: pointer; }
+.views button + button { border-left: 1px solid var(--line); }
+.views button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+.views button:focus-visible, input:focus-visible, .panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#search { font: 13px var(--font-mono); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; width: min(260px, 100%); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--node); }
+.dot.ring { background: none; border: 2px solid var(--ink); }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; }
+.stage { position: relative; min-width: 0; min-height: 420px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.hint { position: absolute; left: 12px; bottom: 10px; font-size: 12px; color: var(--muted); pointer-events: none; }
+.count { position: absolute; right: 12px; top: 10px; font: 12px var(--font-mono); color: var(--muted); pointer-events: none; }
+.panel { min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.panel h2 { font-family: var(--font-mono); font-weight: 500; font-size: 16px; margin: 0; overflow-wrap: anywhere; }
+.panel h3 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+.panel p { margin: 0; line-height: 1.5; color: var(--muted); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.chain { display: flex; flex-direction: column; gap: 2px; font: 12px var(--font-mono); }
+.chain button { all: unset; cursor: pointer; color: var(--accent); overflow-wrap: anywhere; }
+.chain button:hover { text-decoration: underline; }
+.vulns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.vulns li { border-left: 3px solid var(--sev, var(--node)); padding-left: 10px; display: flex; flex-direction: column; gap: 3px; }
+.vulns .id { font: 500 13px var(--font-mono); }
+.vulns .id a { color: inherit; }
+.vulns .meta { font-size: 12px; color: var(--muted); }
+.pill { font: 600 10px var(--font-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--surface); background: var(--sev, var(--node)); border-radius: 3px; padding: 1px 5px; margin-right: 6px; }
+.top { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.top button { all: unset; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; font: 12px var(--font-mono); width: 100%; }
+.top button:hover span:first-child { text-decoration: underline; }
+.top .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 860px) {
+  html, body { height: auto; }
+  main { grid-template-columns: minmax(0, 1fr); }
+  .stage { height: 62vh; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<header>
+  <div>
+    <div class="eyebrow" id="eyebrow">Guardian dependency graph</div>
+    <h1 id="heading">Dependency graph</h1>
+  </div>
+  <dl class="facts" id="facts"></dl>
+</header>
+
+<div class="toolbar">
+  <div class="views" role="group" aria-label="Graph view">
+    <button type="button" id="view-vulnerable" data-view="vulnerable" aria-pressed="true">Vulnerable paths</button>
+    <button type="button" id="view-direct" data-view="direct" aria-pressed="false">Direct</button>
+    <button type="button" id="view-all" data-view="all" aria-pressed="false">Everything</button>
+  </div>
+  <input id="search" type="search" placeholder="Find a package…" aria-label="Find a package" list="package-names" autocomplete="off">
+  <datalist id="package-names"></datalist>
+  <div class="legend" aria-label="Legend">
+    <span><i class="dot" style="background:var(--sev-critical)"></i>Critical</span>
+    <span><i class="dot" style="background:var(--sev-high)"></i>High</span>
+    <span><i class="dot" style="background:var(--sev-medium)"></i>Medium</span>
+    <span><i class="dot" style="background:var(--sev-low)"></i>Low</span>
+    <span><i class="dot"></i>No known vulnerability</span>
+    <span><i class="dot ring"></i>Direct dependency</span>
+  </div>
+</div>
+
+<main>
+  <div class="stage">
+    <canvas id="graph" aria-label="Dependency graph. Use the package search or the list in the side panel to inspect packages."></canvas>
+    <div class="count" id="count"></div>
+    <div class="hint">Drag to pan · scroll or pinch to zoom · click a package</div>
+  </div>
+  <aside class="panel" id="panel" aria-live="polite"></aside>
+</main>
+
+<script id="graph-data" type="application/json">/*__GRAPH_DATA__*/</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>
+(async function () {
+  "use strict";
+  // ---- data -----------------------------------------------------------------------------
+  let data;
+  const inline = document.getElementById("graph-data").textContent.trim();
+  if (inline && !inline.startsWith("/*")) {
+    data = JSON.parse(inline);
+  } else {
+    const res = await fetch("graph.json");
+    data = await res.json();
+  }
+  const SEV = ["info", "low", "unknown", "medium", "high", "critical"]; // index = rank
+  const SEV_RANK = { info: 0, low: 1, unknown: 2, medium: 3, high: 4, critical: 5 };
+  const css = getComputedStyle(document.documentElement);
+  let palette = {};
+  function readPalette() {
+    const c = getComputedStyle(document.documentElement);
+    const v = (n) => c.getPropertyValue(n).trim();
+    palette = {
+      ink: v("--ink"), muted: v("--muted"), surface: v("--surface"), accent: v("--accent"),
+      edge: v("--edge"), edgeHot: v("--edge-hot"), node: v("--node"),
+      sev: { critical: v("--sev-critical"), high: v("--sev-high"), medium: v("--sev-medium"),
+             low: v("--sev-low"), unknown: v("--sev-unknown") },
+    };
+  }
+  readPalette();
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readPalette(); draw(); });
+  new MutationObserver(() => { readPalette(); draw(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  const nodes = data.nodes.map((n, i) => ({ ...n, index: i, parents: [], children: [], maxSev: -1 }));
+  const findings = data.findings;
+  for (const [s, t] of data.links) { nodes[s].children.push(t); nodes[t].parents.push(s); }
+  for (const n of nodes) {
+    for (const fi of n.f || []) n.maxSev = Math.max(n.maxSev, SEV_RANK[findings[fi].severity] ?? 2);
+  }
+  // Shortest path from the repository (BFS parents) for "how it enters" chains.
+  const bfsParent = new Array(nodes.length).fill(-1);
+  { const q = [0]; const seen = new Uint8Array(nodes.length); seen[0] = 1;
+    while (q.length) { const u = q.shift(); for (const v of nodes[u].children) if (!seen[v]) { seen[v] = 1; bfsParent[v] = u; q.push(v); } } }
+  function chainTo(i) { const out = []; let c = i; while (c > 0) { out.push(c); c = bfsParent[c]; } return out.reverse(); }
+
+  // View membership.
+  const vulnerable = nodes.filter((n) => n.maxSev >= 0).map((n) => n.index);
+  const onVulnPath = new Uint8Array(nodes.length);
+  { const stack = [...vulnerable]; for (const i of stack) onVulnPath[i] = 1;
+    while (stack.length) { const u = stack.pop(); for (const p of nodes[u].parents) if (!onVulnPath[p]) { onVulnPath[p] = 1; stack.push(p); } } }
+  onVulnPath[0] = 1;
+  const VIEWS = {
+    vulnerable: (n) => onVulnPath[n.index] === 1,
+    direct: (n) => n.index === 0 || n.depth === 1,
+    all: () => true,
+  };
+
+  // ---- header ---------------------------------------------------------------------------
+  document.getElementById("heading").textContent = data.meta.title;
+  document.getElementById("eyebrow").textContent =
+    `Guardian scan ${data.meta.scan_id.slice(0, 12)} · ${data.meta.scanned_at.slice(0, 10)}` +
+    (data.meta.commit ? ` · commit ${data.meta.commit.slice(0, 10)}` : "");
+  const facts = [
+    ["Packages", data.meta.components], ["Direct", data.meta.direct], ["Dependency edges", data.meta.edges],
+    ["Vulnerable packages", vulnerable.length], ["Known vulnerabilities", findings.length],
+  ];
+  const factsEl = document.getElementById("facts");
+  for (const [label, value] of facts) {
+    const d = document.createElement("div");
+    const dt = document.createElement("dt"); dt.textContent = label;
+    const dd = document.createElement("dd"); dd.textContent = Number(value).toLocaleString();
+    d.append(dt, dd); factsEl.append(d);
+  }
+  const dl = document.getElementById("package-names");
+  for (const n of nodes.slice(1)) { const o = document.createElement("option"); o.value = label(n); dl.append(o); }
+
+  // ---- canvas + simulation --------------------------------------------------------------
+  const canvas = document.getElementById("graph");
+  const ctx = canvas.getContext("2d");
+  let width = 0, height = 0, dpr = 1, transform = d3.zoomIdentity;
+  let view = "vulnerable", shown = [], shownLinks = [], selected = -1, hovered = -1, highlight = new Set();
+  let sim = null;
+
+  function label(n) { return n.root ? n.name : `${n.name}@${n.version || "?"}`; }
+  function radius(n) { return n.root ? 9 : 2.5 + Math.min(6, Math.log2(1 + n.parents.length) * 1.4) + (n.maxSev >= 3 ? 1.5 : 0); }
+  function fill(n) {
+    if (n.root) return palette.ink;
+    if (n.maxSev < 0) return palette.node;
+    return palette.sev[SEV[n.maxSev]] || palette.sev.unknown;
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    width = rect.width; height = rect.height;
+    canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+    draw();
+  }
+  new ResizeObserver(resize).observe(canvas);
+
+  function setView(next) {
+    view = next;
+    for (const b of document.querySelectorAll(".views button")) b.setAttribute("aria-pressed", String(b.dataset.view === next));
+    try { localStorage.setItem("guardian-graph-view", next); } catch (_) { /* storage unavailable */ }
+    const keep = VIEWS[next];
+    shown = nodes.filter(keep);
+    const inView = new Uint8Array(nodes.length); for (const n of shown) inView[n.index] = 1;
+    shownLinks = data.links.filter(([s, t]) => inView[s] && inView[t]).map(([s, t]) => ({ source: nodes[s], target: nodes[t] }));
+    document.getElementById("count").textContent = `${shown.length.toLocaleString()} packages · ${shownLinks.length.toLocaleString()} edges`;
+    for (const n of shown) if (n.x === undefined) { n.x = (Math.random() - 0.5) * 200; n.y = (Math.random() - 0.5) * 200; }
+    nodes[0].fx = 0; nodes[0].fy = 0;
+    if (sim) sim.stop();
+    const big = shown.length > 600;
+    sim = d3.forceSimulation(shown)
+      .force("link", d3.forceLink(shownLinks).distance((l) => (l.source.root ? 70 : 28)).strength(big ? 0.25 : 0.5))
+      .force("charge", d3.forceManyBody().strength(big ? -22 : -60).distanceMax(big ? 260 : 400))
+      .force("collide", d3.forceCollide().radius((n) => radius(n) + 1.5))
+      .force("x", d3.forceX(0).strength(0.03)).force("y", d3.forceY(0).strength(0.03))
+      .alphaDecay(big ? 0.045 : 0.03)
+      .on("tick", draw);
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { sim.stop(); sim.tick(250); draw(); }
+    if (selected >= 0 && !inView[selected]) select(-1);
+    fitSoon();
+  }
+
+  let fitTimer = 0;
+  function fitSoon() {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => {
+      if (!shown.length || !width) return;
+      const xs = shown.map((n) => n.x), ys = shown.map((n) => n.y);
+      const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+      const k = Math.min(2.5, 0.9 * Math.min(width / (x1 - x0 + 40), height / (y1 - y0 + 40)));
+      const t = d3.zoomIdentity.translate(width / 2 - k * (x0 + x1) / 2, height / 2 - k * (y0 + y1) / 2).scale(k);
+      d3.select(canvas).transition().duration(500).call(zoom.transform, t);
+    }, 900);
+  }
+
+  function draw() {
+    if (!width) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(transform.x, transform.y); ctx.scale(transform.k, transform.k);
+    const focus = highlight.size > 0;
+    ctx.lineWidth = 0.7 / transform.k;
+    ctx.strokeStyle = palette.edge;
+    ctx.beginPath();
+    for (const l of shownLinks) {
+      if (focus && highlight.has(l.source.index) && highlight.has(l.target.index)) continue;
+      ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y);
+    }
+    ctx.stroke();
+    if (focus) {
+      ctx.strokeStyle = palette.edgeHot; ctx.lineWidth = 1.8 / transform.k; ctx.beginPath();
+      for (const l of shownLinks) if (highlight.has(l.source.index) && highlight.has(l.target.index)) {
+        ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y);
+      }
+      ctx.stroke();
+    }
+    for (const n of shown) {
+      const r = radius(n);
+      ctx.globalAlpha = focus && !highlight.has(n.index) ? 0.35 : 1;
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 2 * Math.PI); ctx.fillStyle = fill(n); ctx.fill();
+      if (n.depth === 1) { ctx.lineWidth = 1.6 / transform.k; ctx.strokeStyle = palette.ink; ctx.stroke(); }
+      if (n.index === selected) { ctx.lineWidth = 2.5 / transform.k; ctx.strokeStyle = palette.accent; ctx.beginPath(); ctx.arc(n.x, n.y, r + 3 / transform.k, 0, 2 * Math.PI); ctx.stroke(); }
+    }
+    ctx.globalAlpha = 1;
+    // Labels: root, selection chain, hovered, vulnerable direct deps, and everything once zoomed in.
+    ctx.font = `${11 / transform.k}px ${css.getPropertyValue("--font-mono")}`;
+    ctx.textBaseline = "middle";
+    for (const n of shown) {
+      const always = n.root || n.index === hovered || highlight.has(n.index) || (n.depth === 1 && n.maxSev >= 3);
+      if (!always && transform.k < 1.6) continue;
+      const text = label(n);
+      const x = n.x + radius(n) + 3 / transform.k;
+      ctx.lineWidth = 3 / transform.k; ctx.strokeStyle = palette.surface; ctx.strokeText(text, x, n.y);
+      ctx.fillStyle = n.maxSev >= 3 ? palette.ink : palette.muted; ctx.fillText(text, x, n.y);
+    }
+    ctx.restore();
+  }
+
+  const zoom = d3.zoom().scaleExtent([0.05, 8]).on("zoom", (e) => { transform = e.transform; draw(); });
+  d3.select(canvas).call(zoom).on("dblclick.zoom", null);
+
+  function nodeAt(px, py) {
+    const [x, y] = transform.invert([px, py]);
+    let best = -1, bestD = Infinity;
+    for (const n of shown) {
+      const d = (n.x - x) ** 2 + (n.y - y) ** 2, r = radius(n) + 4 / transform.k;
+      if (d < r * r && d < bestD) { best = n.index; bestD = d; }
+    }
+    return best;
+  }
+  canvas.addEventListener("mousemove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const i = nodeAt(e.clientX - rect.left, e.clientY - rect.top);
+    if (i !== hovered) { hovered = i; canvas.style.cursor = i >= 0 ? "pointer" : "grab"; draw(); }
+  });
+  canvas.addEventListener("click", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    select(nodeAt(e.clientX - rect.left, e.clientY - rect.top));
+  });
+
+  // ---- inspector panel ------------------------------------------------------------------
+  const panel = document.getElementById("panel");
+  function el(tag, props = {}, ...kids) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k === "style") e.style.cssText = v; else if (k === "on") e.addEventListener("click", v); else e[k] = v;
+    }
+    for (const k of kids) if (k != null) e.append(k);  // strings become text nodes: never HTML
+    return e;
+  }
+
+  function select(i) {
+    selected = i;
+    highlight = new Set();
+    if (i > 0) { for (const c of [0, ...chainTo(i)]) highlight.add(c); }
+    renderPanel();
+    draw();
+  }
+
+  function overview() {
+    const parts = [el("h2", {}, "Where the risk is")];
+    parts.push(el("p", {}, "Vulnerable packages ranked by severity, then by how many packages depend on them. Pick one to see how it enters the application."));
+    const ranked = vulnerable.map((i) => nodes[i]).sort((a, b) => b.maxSev - a.maxSev || b.parents.length - a.parents.length).slice(0, 25);
+    const list = el("ul", { className: "top" });
+    for (const n of ranked) {
+      const sev = SEV[n.maxSev];
+      list.append(el("li", {}, el("button", { type: "button", on: () => focusNode(n.index) },
+        el("span", {}, el("span", { className: "pill", style: `--sev: var(--sev-${sev})` }, sev), label(n)),
+        el("span", { className: "n" }, `${(n.f || []).length} vuln${(n.f || []).length === 1 ? "" : "s"}`))));
+    }
+    parts.push(el("div", {}, el("h3", {}, "Most severe vulnerable packages"), list));
+    return parts;
+  }
+
+  function details(n) {
+    const parts = [el("div", {}, el("div", { className: "eyebrow" }, n.root ? "Repository" : (n.depth === 1 ? "Direct dependency" : `Transitive · depth ${n.depth ?? "?"}`)), el("h2", {}, label(n)))];
+    if (!n.root) {
+      const kv = el("dl", { className: "kv" });
+      const add = (k, v) => { if (v !== undefined && v !== null && v !== "") kv.append(el("dt", {}, k), el("dd", {}, String(v))); };
+      add("Ecosystem", n.eco); add("Scope", n.scope); add("Licenses", (n.licenses || []).join(", ") || "not declared");
+      add("Depends on", n.children.length); add("Used by", n.parents.filter((p) => p > 0).length + (n.parents.includes(0) ? " + repository" : ""));
+      add("Declared in", (n.declared || []).join(", "));
+      parts.push(kv);
+      const chain = chainTo(n.index);
+      if (chain.length) {
+        const box = el("div", { className: "chain" });
+        box.append(el("span", {}, nodes[0].name));
+        for (const c of chain) box.append(el("button", { type: "button", on: () => focusNode(c) }, "↳ " + label(nodes[c])));
+        parts.push(el("div", {}, el("h3", {}, "How it enters the application"), box));
+      }
+    }
+    const vs = (n.f || []).map((i) => findings[i]).sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity]);
+    if (vs.length) {
+      const list = el("ul", { className: "vulns" });
+      for (const v of vs) {
+        const link = v.url && /^https:\/\//.test(v.url) ? el("a", { href: v.url, target: "_blank", rel: "noopener noreferrer" }, v.vulnerability_id) : v.vulnerability_id;
+        list.append(el("li", { style: `--sev: var(--sev-${v.severity})` },
+          el("span", { className: "id" }, el("span", { className: "pill" }, v.severity), link),
+          v.summary ? el("span", {}, v.summary) : null,
+          el("span", { className: "meta" }, [v.cvss != null ? `CVSS ${v.cvss}` : null, v.fix ? `fixed in ${v.fix}` : "no fixed release", ...(v.cwe || [])].filter(Boolean).join(" · "))));
+      }
+      parts.push(el("div", {}, el("h3", {}, `Known vulnerabilities (${vs.length})`), list));
+    } else if (!n.root) {
+      parts.push(el("p", {}, "No known vulnerabilities in this version according to OSV."));
+    }
+    parts.push(el("button", { type: "button", className: "views", style: "align-self:flex-start;padding:6px 10px;font:500 13px var(--font-ui);color:var(--ink);cursor:pointer", on: () => select(-1) }, "Back to overview"));
+    return parts;
+  }
+
+  function renderPanel() {
+    panel.replaceChildren(...(selected >= 0 ? details(nodes[selected]) : overview()));
+  }
+
+  function focusNode(i) {
+    if (!VIEWS[view](nodes[i])) setView("all");
+    select(i);
+    const n = nodes[i];
+    const center = () => {
+      if (n.x === undefined) return;
+      const k = Math.max(transform.k, 1.8);
+      d3.select(canvas).transition().duration(450).call(zoom.transform, d3.zoomIdentity.translate(width / 2 - k * n.x, height / 2 - k * n.y).scale(k));
+    };
+    setTimeout(center, 50);
+  }
+
+  document.getElementById("search").addEventListener("change", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    if (!q) return;
+    const hit = nodes.find((n) => label(n).toLowerCase() === q) || nodes.find((n) => n.name.toLowerCase() === q) || nodes.find((n) => n.name.toLowerCase().includes(q));
+    if (hit) focusNode(hit.index);
+  });
+  for (const b of document.querySelectorAll(".views button")) b.addEventListener("click", () => setView(b.dataset.view));
+
+  let initial = "vulnerable";
+  try { initial = localStorage.getItem("guardian-graph-view") || initial; } catch (_) { /* storage unavailable */ }
+  if (!VIEWS[initial]) initial = "vulnerable";
+  renderPanel();
+  setView(initial);
+})();
+</script>

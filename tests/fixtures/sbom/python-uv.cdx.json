@@ -1,0 +1,27 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "metadata": {
+    "tools": [{"vendor": "cyclonedx", "name": "cdxgen", "version": "11.0.0"}],
+    "component": {"name": "app", "version": "0.1.0", "purl": "pkg:pypi/app@0.1.0",
+                  "bom-ref": "pkg:pypi/app@0.1.0", "type": "application"}
+  },
+  "components": [
+    {"name": "pydantic", "version": "2.14.4", "purl": "pkg:pypi/pydantic@2.14.4",
+     "bom-ref": "pkg:pypi/pydantic@2.14.4", "type": "library",
+     "properties": [{"name": "SrcFile", "value": "pyproject.toml"}]},
+    {"name": "pydantic-settings", "version": "2.16.3", "purl": "pkg:pypi/pydantic-settings@2.16.3",
+     "bom-ref": "pkg:pypi/pydantic-settings@2.16.3", "type": "library"},
+    {"name": "typing-extensions", "version": "4.16.0", "purl": "pkg:pypi/typing-extensions@4.16.0",
+     "bom-ref": "pkg:pypi/typing-extensions@4.16.0", "type": "library"},
+    {"name": "pytest", "version": "9.2.0", "purl": "pkg:pypi/pytest@9.2.0",
+     "bom-ref": "pkg:pypi/pytest@9.2.0", "type": "library", "scope": "optional"},
+    {"name": "app", "version": "0.1.0", "purl": "pkg:pypi/app@0.1.0",
+     "bom-ref": "pkg:pypi/app@0.1.0", "type": "library"}
+  ],
+  "dependencies": [
+    {"ref": "pkg:pypi/app@0.1.0", "dependsOn": []},
+    {"ref": "pkg:pypi/pydantic-settings@2.16.3", "dependsOn": ["pkg:pypi/pydantic@2.14.4"]},
+    {"ref": "pkg:pypi/pydantic@2.14.4", "dependsOn": ["pkg:pypi/typing-extensions@4.16.0"]}
+  ]
+}
