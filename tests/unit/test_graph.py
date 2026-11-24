@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -24,8 +26,10 @@ def setup(make_repo):
     )
     profile = RepositoryProfiler(settings=GuardianSettings(_env_file=None)).profile(root)
     raw = (FIXTURES / "node-express.cdx.json").read_text()
-    # Point SrcFile at this checkout so DECLARED_IN resolves.
-    raw = raw.replace("C:\\\\Temp\\\\elsewhere\\\\sample", str(root).replace("\\", "\\\\"))
+    # Point SrcFile at this checkout so DECLARED_IN resolves. Replace the trailing separator
+    # too, so the path uses this OS's separator (a stray backslash breaks it on POSIX).
+    native_root = json.dumps(str(root) + os.sep)[1:-1]
+    raw = raw.replace("C:\\\\Temp\\\\elsewhere\\\\sample\\\\", native_root)
     sbom = parse_cyclonedx(
         raw,
         repo_root=root,

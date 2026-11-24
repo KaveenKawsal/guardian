@@ -81,8 +81,13 @@ class SbomGenerator:
         executable = self.runner.resolve(CDXGEN)
         if executable is not None:
             install = find_cdxgen_install(Path(executable))
-            tmp = Path(tempfile.gettempdir()).resolve()
-            options = node_permission_options([install, repo_root, tmp], [tmp]) if install else None
+            # Grant the temp dir under both its literal and resolved names: Node's permission
+            # model compares paths textually, and on macOS /var/folders -> /private/var/folders.
+            raw_tmp = Path(tempfile.gettempdir())
+            tmps = list(dict.fromkeys([raw_tmp, raw_tmp.resolve()]))
+            options = (
+                node_permission_options([install, repo_root, *tmps], tmps) if install else None
+            )
             if options:
                 env["NODE_OPTIONS"] = options
                 sandboxed = True
