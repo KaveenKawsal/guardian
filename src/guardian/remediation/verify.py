@@ -29,7 +29,14 @@ from pathlib import Path
 
 from guardian.core.config import GuardianSettings
 from guardian.core.exceptions import GuardianError
-from guardian.core.models import Confidence, Finding, ScanRecord, ScanStatus, Severity
+from guardian.core.models import (
+    ChangeDetails,
+    Confidence,
+    Finding,
+    ScanRecord,
+    ScanStatus,
+    Severity,
+)
 from guardian.core.remediation_models import (
     CaseStatus,
     HumanDecision,
@@ -91,6 +98,18 @@ class VerdictInputs:
     resolved: Sequence[str] = ()
     new_findings: Sequence[Finding] = ()
     scan_error: str | None = None
+
+
+def _is_own_fix_commit(finding: Finding, applied: AppliedChange) -> bool:
+    """The rescan's git history reports Guardian's own fix commit as a manifest change; that
+    is the fix itself, not a new risk, so it never counts against the verdict."""
+    details = finding.details
+    return (
+        isinstance(details, ChangeDetails)
+        and details.commit is not None
+        and bool(applied.commit_sha)
+        and details.commit == applied.commit_sha
+    )
 
 
 def _scan_problem(after: ScanRecord | None, scan_error: str | None) -> str | None:
@@ -257,7 +276,7 @@ def verify_case(  # noqa: PLR0913 - every collaborator is injectable for tests
     targets = list(case.finding_ids)
     after_ids = {f.id for f in after}
     _, _, new_ids = diff_findings(before, after)
-    new_findings = [f for f in after if f.id in set(new_ids)]
+    new_findings = [f for f in after if f.id in set(new_ids) and not _is_own_fix_commit(f, applied)]
     if after_record is not None:
         resolved = [t for t in targets if t not in after_ids]
         still_present = [t for t in targets if t in after_ids]
@@ -284,7 +303,7 @@ def verify_case(  # noqa: PLR0913 - every collaborator is injectable for tests
         after_scan_id=after_scan_id,
         target_findings_resolved=resolved,
         findings_still_present=still_present,
-        new_findings=sorted(new_ids),
+        new_findings=sorted(f.id for f in new_findings),
         sbom_diff=diff_sboms(
             db.sboms.load(before_scan_id), db.sboms.load(after_scan_id) if after_scan_id else None
         ),

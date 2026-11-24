@@ -405,3 +405,51 @@ def test_run_remediation_apply_failure(flow):
     assert run.applied is None
     assert "changed no files" in run.errors[0]
     assert _statuses(flow["db"], run.case.id)[-1] == "status:APPLYING->VALIDATION_FAILED"
+
+
+def _change(finding_id, commit):
+    from guardian.core.models import ChangeCategory, ChangeDetails, Finding, FindingKind
+
+    return Finding(
+        id=finding_id,
+        kind=FindingKind.CHANGE,
+        title="Dependency manifest changed",
+        severity=Severity.INFO,
+        tool="git",
+        details=ChangeDetails(
+            category=ChangeCategory.MANIFEST, commit=commit, paths=["package.json"]
+        ),
+    )
+
+
+def test_own_fix_commit_is_not_a_new_finding(db):
+    """The rescan's git history reports Guardian's own fix commit; that is the fix itself."""
+    case = _before(db)
+
+    def scan_fn(path):
+        return make_scan(
+            db,
+            "after",
+            str(path),
+            findings=[_change("own", "abc"), _change("someone-else", "f" * 40)],
+            sbom=sbom_with("pkg:npm/lodash@4.17.21"),
+        )
+
+    result = verify_case(db, case, _applied(case), _run(), before_scan_id="before", scan_fn=scan_fn)
+    assert result.new_findings == ["someone-else"]  # someone else's change still counts
+    assert result.status is VerificationStatus.PARTIALLY_VERIFIED
+
+    def only_own(path):
+        return make_scan(
+            db,
+            "after2",
+            str(path),
+            findings=[_change("own2", "abc")],
+            sbom=sbom_with("pkg:npm/lodash@4.17.21"),
+        )
+
+    result = verify_case(
+        db, case, _applied(case), _run(), before_scan_id="before", scan_fn=only_own
+    )
+    assert result.new_findings == []
+    assert result.status is VerificationStatus.VERIFIED
