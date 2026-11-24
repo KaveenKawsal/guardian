@@ -357,6 +357,63 @@ class ChangeRecord(_Frozen):
     files: list[FileChange] = Field(default_factory=list)
 
 
+# --- Risk assessment -------------------------------------------------------------------
+#
+# Guardian heuristic (not an industry standard): R = 0.35 S + 0.25 E + 0.20 X + 0.10 P + 0.10 F
+# with each factor in [0, 1]. Unknown factors stay unknown (value None) and are excluded from
+# the weighted mean instead of counting as zero; `known_weight` says how much evidence the
+# score rests on.
+
+
+class RiskFactorName(StrEnum):
+    SEVERITY = "severity"  # S: vulnerability / rule severity
+    EXPOSURE = "exposure"  # E: exposure and dependency context (direct, entry points, scope)
+    EXPLOITABILITY = "exploitability"  # X: evidence of exploitability (AI investigation, phase 5)
+    REACHABILITY = "reachability"  # P: potential reachability (imported / called / in a route)
+    FIX = "fix"  # F: fix availability and remediation context (higher = easier to act on)
+
+
+RISK_WEIGHTS: dict[RiskFactorName, float] = {
+    RiskFactorName.SEVERITY: 0.35,
+    RiskFactorName.EXPOSURE: 0.25,
+    RiskFactorName.EXPLOITABILITY: 0.20,
+    RiskFactorName.REACHABILITY: 0.10,
+    RiskFactorName.FIX: 0.10,
+}
+
+
+class RiskFactor(_Frozen):
+    name: RiskFactorName
+    weight: float
+    value: float | None = Field(default=None, ge=0, le=1, description="None = unknown")
+    rationale: str
+
+
+class Priority(StrEnum):
+    P1 = "P1"  # act now
+    P2 = "P2"  # schedule soon
+    P3 = "P3"  # backlog
+    P4 = "P4"  # informational
+
+
+class Confidence(StrEnum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class RiskAssessment(_Frozen):
+    finding_id: str
+    score: float | None = Field(
+        default=None, ge=0, le=100, description="Weighted mean of known factors x 100"
+    )
+    known_weight: float = Field(ge=0, le=1, description="Sum of weights of known factors")
+    confidence: Confidence
+    priority: Priority
+    factors: list[RiskFactor]
+    summary: str = Field(description="One sentence a reviewer can read, e.g. why P1")
+
+
 # --- Codebase index (phase 4) ----------------------------------------------------------
 #
 # Paths are repository-relative POSIX strings. Lines are 1-based and inclusive. A symbol id

@@ -14,12 +14,15 @@ from guardian.cli.code import code_summary
 from guardian.cli.common import cli_errors, console, err_console, open_database, styled_status
 from guardian.cli.findings import findings_table, severity_summary
 from guardian.cli.profile import render_profile
+from guardian.cli.report import DEFAULT_OUTPUT, generate_reports, parse_formats, print_written
 from guardian.core.config import GuardianSettings
+from guardian.core.exceptions import GuardianError
 from guardian.core.models import (
     DirectSource,
     Ecosystem,
     ManifestKind,
     RepositoryProfile,
+    ScanStatus,
     Severity,
 )
 from guardian.execution.policies import ExecutionPolicy
@@ -38,7 +41,7 @@ MAX_DIRECT_ROWS = 30
 MAX_FINDING_ROWS = 15
 
 
-def scan(
+def scan(  # noqa: PLR0913, PLR0917 - one parameter per CLI option
     target: Annotated[
         str | None,
         typer.Argument(
@@ -61,11 +64,31 @@ def scan(
     json_output: Annotated[
         bool, typer.Option("--json", help="Print the scan result as JSON.")
     ] = False,
+    write_report: Annotated[
+        bool,
+        typer.Option(
+            "--report",
+            help=f"After the scan, write review reports to ./{DEFAULT_OUTPUT} "
+            "(HTML unless --report-format is given).",
+        ),
+    ] = False,
+    report_formats: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--report-format",
+            help="Report format for --report: html, md or json; repeatable or a comma list. "
+            "Implies --report.",
+            show_default=False,
+        ),
+    ] = None,
 ) -> None:
     """Scan a repository: profile, SBOM, vulnerabilities, code and change analysis."""
     # Progress goes to stderr in JSON mode so stdout stays a single JSON document.
     progress = err_console if json_output else console
     settings = GuardianSettings()
+    formats = parse_formats(report_formats) if write_report or report_formats else None
+    report_paths: list[Path] = []
+    report_error: GuardianError | None = None
     with cli_errors():
         source = resolve_target(target, ref)
         clone_dir: Path | None = None
@@ -79,6 +102,14 @@ def scan(
             with open_database(settings) as db:
                 progress.print(f"Scanning [bold]{escape(str(path.resolve()))}[/bold] ...")
                 outcome = ScanPipeline(db, settings).run(path)
+                if formats and outcome.record.status is not ScanStatus.FAILED:
+                    # Before a --no-keep clone is deleted, so code snippets are still readable.
+                    try:
+                        _, report_paths = generate_reports(
+                            db, outcome.record.id, settings, formats, DEFAULT_OUTPUT
+                        )
+                    except GuardianError as exc:
+                        report_error = exc
         finally:
             if clone_dir is not None and not keep:
                 remove_workspace(clone_dir, settings)
@@ -100,6 +131,10 @@ def scan(
     if clone_dir is not None:
         where = f"Clone kept at {clone_dir}" if keep else "Clone deleted (--no-keep)"
         progress.print(escape(where))
+    print_written(report_paths, progress)
+    if report_error is not None:
+        err_console.print(f"[red]error:[/red] report not written: {escape(str(report_error))}")
+        raise typer.Exit(code=2)
 
 
 def resolve_target(target: str | None, ref: str | None) -> Target:

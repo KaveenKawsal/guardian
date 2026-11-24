@@ -20,7 +20,10 @@ winget install Google.OSVScanner             # known-vulnerability matching (or 
 uv tool install semgrep                      # static analysis
 # Every tool is optional: a missing one makes the scan "partial" instead of failing it.
 
+uv run guardian                              # interactive shell (see below)
 uv run guardian scan ./my-project            # profile + SBOM + dependency graph, stored in ~/.guardian
+uv run guardian scan ./my-project --report   # ...and write an HTML review report
+uv run guardian report -f html,md,json       # review reports for the latest scan (./guardian-reports)
 uv run guardian scan https://github.com/juice-shop/juice-shop   # clone a public HTTPS repo, then scan it
 uv run guardian scan juice-shop/juice-shop --ref v17.0.0        # GitHub shorthand, branch or tag
 uv run guardian scan                         # in a terminal: prompts for a URL or local path
@@ -39,6 +42,41 @@ uv run guardian profile ./my-project --json  # profile only, no storage
 uv run guardian doctor                       # check external tools
 ```
 
+### Interactive shell
+
+Run `guardian` with no arguments in a terminal (or `guardian shell`):
+
+```text
+guardian> C:\code\my-api                       # paste a folder path: scans it
+guardian> https://github.com/OWASP/NodeGoat    # or a repository URL / owner/repo
+guardian> which findings should I fix first?   # plain questions go to the AI assistant
+guardian> /report md,html                      # write review reports for the current scan
+```
+
+Slash commands (Tab completes): `/scan`, `/summary`, `/findings`, `/explain <id>`, `/deps`,
+`/code`, `/graph`, `/report`, `/history`, `/use <scan>`, `/model [groq|google] [model]`,
+`/clear`, `/doctor`, `/help`, `/exit`. The assistant answers only through read-only tools over
+the stored scan, cites finding ids and `file:line`, and treats everything from the scanned
+repository as untrusted data, never as instructions. Without an API key the shell still works;
+only questions are unavailable.
+
+### Review reports
+
+`guardian report` writes, per scan, to `./guardian-reports/`:
+
+- **HTML**: one self-contained file (no network). Findings are ranked P1–P4 with
+  the risk score, each factor's evidence, dependency chains, redacted code with line numbers,
+  and remediation. You can filter findings and set a verdict per finding (confirmed / false
+  positive / needs review / accepted risk) with notes. Verdicts are kept in your browser, and
+  you can export them as JSON and import them back.
+- **Markdown**: the same content with reviewer checkboxes, for tickets and pull requests.
+- **JSON**: the full machine-readable report (`schema_version` "1").
+
+Risk scores use the Guardian heuristic R = 0.35 S + 0.25 E + 0.20 X + 0.10 P + 0.10 F, with
+severity, exposure, exploitability, reachability and fix availability. A factor without
+evidence is "unknown". It lowers the confidence, not the score. Exploitability stays unknown
+until AI investigation (phase 5). Only critical or high severity findings can be P1.
+
 ### AI providers (Groq or Google Gemini)
 
 AI investigation (phase 5) uses your own API key; deterministic analysis works without one.
@@ -54,7 +92,7 @@ GOOGLE_API_KEY=...    # https://aistudio.google.com/apikey (GEMINI_API_KEY also 
 uv run guardian ai status                    # which keys are set (masked) and the active model
 uv run guardian ai models                    # live model list from the active provider
 uv run guardian ai test                      # one tiny round-trip to confirm the key works
-uv run guardian ai use google --model gemini-2.5-pro   # switch provider and/or model
+uv run guardian ai use google --model gemini-3.5-flash   # switch provider and/or model
 ```
 
 Keys are never printed, stored in Guardian's database, or passed to scanner subprocesses.

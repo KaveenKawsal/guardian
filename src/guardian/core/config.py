@@ -77,8 +77,8 @@ class GuardianSettings(BaseSettings):
         ),
         repr=False,
     )
-    groq_model: str = "llama-3.3-70b-versatile"
-    google_model: str = "gemini-2.5-flash"
+    groq_model: str = "openai/gpt-oss-120b"
+    google_model: str = "gemini-3.5-flash"
 
     tool_timeout_seconds: float = Field(default=300.0, gt=0)
     max_tool_output_bytes: int = Field(default=20 * 1024 * 1024, gt=0)

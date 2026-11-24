@@ -53,7 +53,7 @@ def test_status_masks_keys(workspace):
     assert GROQ_KEY not in result.output
     assert "...wxyz" in result.output
     assert "not set" in result.output
-    assert "llama-3.3-70b-versatile" in result.output
+    assert "openai/gpt-oss-120b" in result.output
     assert str(home_env) in "".join(result.output.split())
 
 

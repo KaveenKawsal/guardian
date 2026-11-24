@@ -27,3 +27,7 @@ guardian-graph/
 *.db
 *.db-wal
 *.db-shm
+
+# Editor settings
+.vscode/
+guardian-reports/

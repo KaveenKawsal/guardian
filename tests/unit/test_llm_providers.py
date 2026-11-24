@@ -126,7 +126,7 @@ def test_single_key_auto_selects_provider():
     config = resolve_provider(settings(google_api_key=GOOGLE_KEY))
     assert config is not None
     assert config.provider == "google"
-    assert config.model == "gemini-2.5-flash"
+    assert config.model == "gemini-3.5-flash"
     assert GOOGLE_KEY not in repr(config)
 
 
@@ -182,7 +182,7 @@ def test_get_chat_model_groq():
         settings(groq_api_key=GROQ_KEY, llm_temperature=0.2, llm_timeout_seconds=12)
     )
     assert isinstance(model, ChatGroq)
-    assert model.model_name == "llama-3.3-70b-versatile"
+    assert model.model_name == "openai/gpt-oss-120b"
     assert model.groq_api_key is not None
     assert model.groq_api_key.get_secret_value() == GROQ_KEY
     assert model.temperature == 0.2
@@ -326,7 +326,7 @@ def test_check_provider_success():
         settings(groq_api_key=GROQ_KEY), chat_model=FakeListChatModel(responses=["OK"])
     )
     assert result.provider == "groq"
-    assert result.model == "llama-3.3-70b-versatile"
+    assert result.model == "openai/gpt-oss-120b"
     assert result.reply == "OK"
     assert result.latency_seconds >= 0
 
