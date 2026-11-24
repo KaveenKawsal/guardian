@@ -17,6 +17,7 @@ Tree-sitter, NetworkX, SQLite, Pytest). Decisions here are about *how* those pie
 | [08](08-review-reports.md) | HTML / Markdown / JSON reports for human review | 6 prep |
 | [09](09-interactive-shell-and-assistant.md) | Claude-style shell and read-only AI assistant | 5/6 prep |
 | [10](10-engineering-practices.md) | Tooling, CI, testing, subagent workflow, git hygiene | all |
+| [11](11-human-approved-remediation.md) | Human-approved remediation rules, case state machine, audit log | Day 2 |
 
 ## Principles that recur
 

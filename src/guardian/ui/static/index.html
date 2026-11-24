@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Guardian review console</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#detail" id="skip-link">Skip to content</a>
+<header class="top">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <circle cx="6" cy="16" r="4"></circle>
+      <circle cx="26" cy="16" r="4"></circle>
+      <path d="M10 16h12"></path>
+      <circle class="gate" cx="16" cy="16" r="6"></circle>
+    </svg>
+    <h1>Guardian review console</h1>
+  </div>
+  <nav class="views" aria-label="Views">
+    <a class="view-tab" id="tab-cases" href="#cases" data-view="cases">Cases</a>
+    <a class="view-tab" id="tab-architecture" href="#architecture" data-view="architecture">Architecture</a>
+    <a class="view-tab" id="tab-codebase" href="#codebase" data-view="codebase">Codebase</a>
+  </nav>
+  <p class="top-status" id="top-status" aria-live="polite"></p>
+</header>
+<p class="banner" id="banner"></p>
+<main class="view view-architecture" id="view-architecture" hidden>
+  <div id="architecture"><p class="quiet">Loading the architecture…</p></div>
+</main>
+<main class="view view-codebase" id="view-codebase" hidden>
+  <div id="codebase"><p class="quiet">Loading the codebase…</p></div>
+</main>
+<main class="layout" id="view-cases">
+  <nav class="cases" aria-labelledby="cases-title">
+    <h2 id="cases-title">Remediation cases</h2>
+    <div id="case-list"><p class="quiet">Loading cases…</p></div>
+  </nav>
+  <section class="detail" id="detail" tabindex="-1" aria-live="off">
+    <div id="case-detail"><p class="quiet">Loading…</p></div>
+  </section>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

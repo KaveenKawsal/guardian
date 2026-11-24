@@ -19,7 +19,7 @@ from guardian.core.models import (
 )
 from guardian.indexing import tree_sitter
 from guardian.storage.code_index import SqliteIndexCache
-from guardian.storage.database import Database
+from guardian.storage.database import SCHEMA_VERSION, Database
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -145,7 +145,10 @@ def test_upgrades_a_version_2_database(tmp_path):
     conn.close()
 
     with Database(path) as db:
-        assert db.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3
+        assert (
+            db.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+            == SCHEMA_VERSION
+        )
         assert db.scans.get("old") is not None
         assert db.findings.load("old") == []
         assert db.code.load("old") is None

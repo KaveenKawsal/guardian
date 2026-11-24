@@ -6,7 +6,7 @@ identically on every platform and never leak the scanning machine's directory la
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -256,6 +256,18 @@ class Evidence(_Frozen):
     url: str | None = None
 
 
+class AffectedRange(_Frozen):
+    """One OSV ``SEMVER``/``ECOSYSTEM`` affected interval for the finding's package.
+
+    ``introduced`` is inclusive (None or "0" = since the beginning); ``fixed`` is exclusive and
+    ``last_affected`` inclusive. Both None means every later version is affected.
+    """
+
+    introduced: str | None = None
+    fixed: str | None = None
+    last_affected: str | None = None
+
+
 class VulnerabilityDetails(_Frozen):
     kind: Literal[FindingKind.VULNERABILITY] = FindingKind.VULNERABILITY
     vulnerability_id: str
@@ -276,6 +288,10 @@ class VulnerabilityDetails(_Frozen):
     )
     published: datetime | None = None
     references: list[str] = Field(default_factory=list)
+    affected_ranges: list[AffectedRange] = Field(
+        default_factory=list,
+        description="OSV affected intervals for this package; empty in scans stored earlier",
+    )
 
     @property
     def fix_available(self) -> bool:
@@ -394,6 +410,29 @@ class Priority(StrEnum):
     P2 = "P2"  # schedule soon
     P3 = "P3"  # backlog
     P4 = "P4"  # informational
+
+    @property
+    def label(self) -> str:
+        """Bucket word for Jira and report text: P1 critical, P2 high, P3 medium, P4 low."""
+        return _PRIORITY_LABELS[self]
+
+    @classmethod
+    def parse(cls, text: str) -> "Priority":
+        """Accept either spelling: ``P2``, ``p2``, ``HIGH`` or ``high`` all give P2."""
+        key = text.strip().upper()
+        for priority, label in _PRIORITY_LABELS.items():
+            if key in {priority.value, label.upper()}:
+                return priority
+        msg = f"Unknown priority {text!r}; use P1-P4 or critical/high/medium/low"
+        raise ValueError(msg)
+
+
+_PRIORITY_LABELS = {
+    Priority.P1: "critical",
+    Priority.P2: "high",
+    Priority.P3: "medium",
+    Priority.P4: "low",
+}
 
 
 class Confidence(StrEnum):
@@ -640,3 +679,78 @@ class ScanRecord(_Frozen):
     finding_count: int = 0
     tool_runs: list[ToolRunSummary] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+# --- Remediation (Day 2) ---------------------------------------------------------------
+#
+# Remediation models live in `core/remediation_models.py` (which imports from this module) and
+# are re-exported here lazily: an eager import at the bottom of this file would fail whenever
+# `remediation_models` is imported first. Type checkers see the real names via TYPE_CHECKING.
+
+if TYPE_CHECKING:
+    from guardian.core.remediation_models import (
+        ALLOWED_TRANSITIONS,  # noqa: F401
+        AuditEvent,  # noqa: F401
+        CaseStatus,  # noqa: F401
+        ComponentChange,  # noqa: F401
+        DecisionType,  # noqa: F401
+        DeclineReason,  # noqa: F401
+        HumanDecision,  # noqa: F401
+        JiraLink,  # noqa: F401
+        ModifyPayload,  # noqa: F401
+        RemediationActionType,  # noqa: F401
+        RemediationCandidate,  # noqa: F401
+        RemediationCase,  # noqa: F401
+        RemediationPlan,  # noqa: F401
+        SbomDiff,  # noqa: F401
+        SemverJump,  # noqa: F401
+        Source,  # noqa: F401
+        StepStatus,  # noqa: F401
+        ValidationRun,  # noqa: F401
+        ValidationStep,  # noqa: F401
+        VerificationResult,  # noqa: F401
+        VerificationStatus,  # noqa: F401
+        candidate_id_for,  # noqa: F401
+        canonical_json,  # noqa: F401
+        case_id_for,  # noqa: F401
+        fingerprint_for,  # noqa: F401
+    )
+
+_REMEDIATION_EXPORTS = frozenset(
+    {
+        "ALLOWED_TRANSITIONS",
+        "AuditEvent",
+        "CaseStatus",
+        "ComponentChange",
+        "DecisionType",
+        "DeclineReason",
+        "HumanDecision",
+        "JiraLink",
+        "ModifyPayload",
+        "RemediationActionType",
+        "RemediationCandidate",
+        "RemediationCase",
+        "RemediationPlan",
+        "SbomDiff",
+        "SemverJump",
+        "Source",
+        "StepStatus",
+        "ValidationRun",
+        "ValidationStep",
+        "VerificationResult",
+        "VerificationStatus",
+        "candidate_id_for",
+        "canonical_json",
+        "case_id_for",
+        "fingerprint_for",
+    }
+)
+
+
+def __getattr__(name: str) -> object:
+    if name in _REMEDIATION_EXPORTS:
+        from guardian.core import remediation_models  # noqa: PLC0415 - avoids an import cycle
+
+        return getattr(remediation_models, name)
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

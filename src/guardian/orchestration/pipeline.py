@@ -8,13 +8,22 @@
 
 Every analysis step degrades to a warning plus a recorded tool run, so a missing or failing
 tool yields a PARTIAL scan instead of no scan. Phase 5 wraps these steps as LangGraph nodes.
+
+Optional lockfile hook: with a ``lockfile_generator`` (default None = disabled, behaviour
+unchanged), a Node project whose root ``package.json`` has no lockfile (e.g. Juice Shop, whose
+``.npmrc`` sets ``package-lock=false``) gets one generated in the sandbox. The repository is
+then copied (without ``.git``/excluded dirs, never following symlinks) into a temporary scan
+workspace, the lockfile is added there, and cdxgen/OSV-Scanner analyse that copy. Everything
+else (profile, Semgrep, git history, indexing) still uses the original repository, and the
+profile's root stays the original path; nothing is ever written into the user's repository.
 """
 
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +39,7 @@ from guardian.core.exceptions import GuardianError
 from guardian.core.models import (
     ChangeRecord,
     CodeIndex,
+    Ecosystem,
     Finding,
     RepositoryProfile,
     Sbom,
@@ -49,6 +59,11 @@ from guardian.storage.database import Database
 
 _OK_STATUSES = frozenset({ToolStatus.SUCCESS.value, ToolStatus.SKIPPED.value})
 INDEXER = "indexer"
+NPM_LOCKFILE = "npm-lockfile"
+
+LockfileGenerator = Callable[[Path, Path], tuple[Path | None, str | None]]
+"""``generator(repo_root, out_dir) -> (out_dir/package-lock.json | None, warning | None)``;
+see ``guardian.remediation.lockfile.generate_npm_lockfile``."""
 
 
 @dataclass(frozen=True)
@@ -85,6 +100,7 @@ class ScanPipeline:
         semgrep_scanner: SemgrepScanner | None = None,
         change_analyzer: ChangeAnalyzer | None = None,
         indexer: RepositoryIndexer | None = None,
+        lockfile_generator: LockfileGenerator | None = None,
     ) -> None:
         self.db = db
         self.settings = s = settings or GuardianSettings()
@@ -103,6 +119,7 @@ class ScanPipeline:
         # The cache reads/writes through the SQLite connection, so indexing stays on the
         # thread that created ``db`` (the caller's thread).
         self.indexer = indexer or RepositoryIndexer(s, cache=db.code.cache())
+        self.lockfile_generator = lockfile_generator
 
     def run(self, path: Path) -> ScanOutcome:
         started = datetime.now(UTC)
@@ -115,10 +132,13 @@ class ScanPipeline:
         log = _StepLog(warnings=list(profile.warnings))
         log.warnings += [w for e in profile.ecosystems for w in e.warnings]
         try:
-            sbom, raw = self._dependency_stage(profile, log)
-            if sbom is not None:
-                self.db.sboms.save(scan_id, sbom, raw)
-            findings, changes, code_index = self._security_stage(profile, sbom, raw, log)
+            with self._dependency_root(profile, log) as dep_root:
+                sbom, raw = self._dependency_stage(profile, log, dep_root)
+                if sbom is not None:
+                    self.db.sboms.save(scan_id, sbom, raw)
+                findings, changes, code_index = self._security_stage(
+                    profile, sbom, raw, log, dep_root
+                )
             if code_index is not None:
                 self.db.code.save(scan_id, code_index)
             self.db.findings.save(scan_id, findings, changes)
@@ -170,16 +190,70 @@ class ScanPipeline:
 
     # --- dependency intelligence -------------------------------------------------------
 
+    def _needs_lockfile(self, profile: RepositoryProfile) -> bool:
+        node = profile.ecosystem(Ecosystem.NODE)
+        return (
+            self.lockfile_generator is not None
+            and node is not None
+            and not node.lockfiles
+            and any(m.path == "package.json" for m in node.manifests)
+        )
+
+    @contextmanager
+    def _dependency_root(self, profile: RepositoryProfile, log: _StepLog) -> Generator[Path]:
+        """The directory cdxgen and OSV-Scanner analyse (see the module docstring)."""
+        root = Path(profile.root)
+        if not self._needs_lockfile(profile) or self.lockfile_generator is None:
+            yield root
+            return
+        from guardian.remediation.sandbox import copy_tree  # noqa: PLC0415 - optional hook
+
+        with tempfile.TemporaryDirectory(prefix="guardian-lock-scan-") as tmp:
+            started = time.monotonic()
+            try:
+                lockfile, warning = self.lockfile_generator(root, Path(tmp, "lock"))
+            except GuardianError as exc:
+                lockfile, warning = None, f"npm lockfile generation failed: {exc}"
+            elapsed = round(time.monotonic() - started, 3)
+            if warning:
+                log.warnings.append(warning)
+            if lockfile is None:
+                # Like a missing scanner: the scan is PARTIAL because the resolved tree is unknown.
+                log.tool_runs.append(
+                    ToolRunSummary(
+                        tool=NPM_LOCKFILE,
+                        status=ToolStatus.FAILED.value,
+                        duration_seconds=elapsed,
+                        error=warning,
+                    )
+                )
+                yield root
+                return
+            copy = Path(tmp, "repo")
+            copy_tree(root, copy, exclude=self.settings.excluded_dirs | {".git"})
+            (copy / "package-lock.json").write_bytes(lockfile.read_bytes())
+            log.tool_runs.append(
+                ToolRunSummary(
+                    tool=NPM_LOCKFILE, status=ToolStatus.SUCCESS.value, duration_seconds=elapsed
+                )
+            )
+            log.warnings.append(
+                "package-lock.json was generated in the sandbox for dependency analysis "
+                "(the repository has none); it was not written to the repository"
+            )
+            yield copy
+
     def _dependency_stage(
-        self, profile: RepositoryProfile, log: _StepLog
+        self, profile: RepositoryProfile, log: _StepLog, root: Path | None = None
     ) -> tuple[Sbom | None, bytes | None]:
+        root = root or Path(profile.root)
         if not profile.ecosystems:
             log.absorb(skipped(CDXGEN, "No supported dependency manifests found"))
             return None, None
 
         with tempfile.TemporaryDirectory(prefix="guardian-sbom-") as work_dir:
             try:
-                generation = self.sbom_generator.generate(Path(profile.root), Path(work_dir))
+                generation = self.sbom_generator.generate(root, Path(work_dir))
             except GuardianError as exc:  # e.g. an argument the runner refuses to pass
                 log.tool_runs.append(
                     ToolRunSummary(tool=CDXGEN, status=ToolStatus.ERROR.value, error=str(exc))
@@ -205,7 +279,7 @@ class ScanPipeline:
         try:
             sbom = parse_cyclonedx(
                 raw,
-                repo_root=Path(profile.root),
+                repo_root=root,
                 manifests=profile.manifest_paths,
                 declared=profile.declared_dependencies,
             )
@@ -223,8 +297,10 @@ class ScanPipeline:
         sbom: Sbom | None,
         raw_sbom: bytes | None,
         log: _StepLog,
+        dep_root: Path | None = None,
     ) -> tuple[list[Finding], list[ChangeRecord], CodeIndex | None]:
         root = Path(profile.root)
+        dep_root = dep_root or root
         excluded = self.settings.excluded_dirs
         with tempfile.TemporaryDirectory(prefix="guardian-scan-") as tmp:
             osv_dir, semgrep_dir = Path(tmp, "osv"), Path(tmp, "semgrep")
@@ -233,7 +309,7 @@ class ScanPipeline:
 
             tasks: dict[str, Callable[[], AnalysisResult]] = {
                 OSV_SCANNER: (
-                    (lambda: self.osv_scanner.scan(root, osv_dir, sbom, raw_sbom, excluded))
+                    (lambda: self.osv_scanner.scan(dep_root, osv_dir, sbom, raw_sbom, excluded))
                     if profile.ecosystems
                     else (lambda: skipped(OSV_SCANNER, "No supported dependency manifests found"))
                 ),

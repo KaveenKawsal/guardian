@@ -78,7 +78,7 @@ def test_scan_remote_keeps_clone_and_groups_history(env):
     assert "Clone kept at" in first.stdout
     flat = " ".join(first.stdout.split())  # Rich wraps long lines
     assert "npm install --package-lock-only --ignore-scripts" in flat
-    assert "never runs package managers" in flat
+    assert "Start Docker Desktop and rescan" in flat
     clones = list(workspaces_dir(env).glob("*/upstream"))
     assert len(clones) == 1
     assert (clones[0] / "app.js").exists()

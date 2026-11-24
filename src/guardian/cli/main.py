@@ -7,16 +7,22 @@ import typer
 
 from guardian import __version__
 from guardian.cli.ai import ai_app
+from guardian.cli.audit import audit_app
 from guardian.cli.code import code
+from guardian.cli.decide import decide, validate
 from guardian.cli.deps import deps
 from guardian.cli.doctor import doctor
 from guardian.cli.findings import explain, findings
 from guardian.cli.graph import graph
 from guardian.cli.history import history
+from guardian.cli.investigate import investigate
+from guardian.cli.jira import jira_app
 from guardian.cli.profile import profile
+from guardian.cli.remediate import case, cases, remediate
 from guardian.cli.report import report
 from guardian.cli.scan import scan
 from guardian.cli.shell import run_shell, shell
+from guardian.cli.ui import ui
 
 app = typer.Typer(
     name="guardian",
@@ -80,4 +86,13 @@ app.command()(profile)
 app.command()(doctor)
 app.command()(report)
 app.command()(shell)
+app.command()(remediate)
+app.command()(cases)
+app.command(name="case")(case)
+app.command()(decide)
+app.command()(validate)
+app.command()(ui)
+app.command()(investigate)
 app.add_typer(ai_app)
+app.add_typer(jira_app)
+app.add_typer(audit_app)

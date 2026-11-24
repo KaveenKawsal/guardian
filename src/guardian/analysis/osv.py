@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from guardian.analysis.base import AnalysisResult, decode_tool_output, stable_id, summarize
 from guardian.core.models import (
+    AffectedRange,
     Component,
     Evidence,
     EvidenceKind,
@@ -28,6 +29,7 @@ from guardian.core.models import (
     VulnerabilityDetails,
 )
 from guardian.execution.runner import ToolRunner
+from guardian.remediation import npm_semver
 
 OSV_SCANNER = "osv-scanner"
 # 0: no vulnerabilities, 1: vulnerabilities found, 128: no packages found.
@@ -55,6 +57,7 @@ class OsvSeverity(_Raw):
 class OsvEvent(_Raw):
     introduced: str | None = None
     fixed: str | None = None
+    last_affected: str | None = None
 
 
 class OsvRange(_Raw):
@@ -187,6 +190,99 @@ def version_key(version: str) -> tuple[tuple[int, int, str], ...]:
         for token in re.findall(r"\d+|[A-Za-z]+", version)
     ]
     return (*tokens, (0, 0, ""))
+
+
+VERSIONED_RANGE_TYPES = frozenset({"SEMVER", "ECOSYSTEM"})
+
+
+def _affected_ranges(package: OsvPackageInfo, vulns: list[OsvVulnerability]) -> list[AffectedRange]:
+    """Every SEMVER/ECOSYSTEM interval of the package across the group's advisories."""
+    ranges: list[AffectedRange] = []
+    for vuln in vulns:
+        for affected in vuln.affected:
+            name = affected.package.name if affected.package else None
+            if name and name.lower() != package.name.lower():
+                continue
+            for rng in affected.ranges:
+                if rng.type.upper() not in VERSIONED_RANGE_TYPES:
+                    continue
+                introduced: str | None = None
+                is_open = False
+                for event in rng.events:
+                    if event.introduced is not None:
+                        if is_open:  # two "introduced" in a row: the first stays open-ended
+                            ranges.append(AffectedRange(introduced=introduced))
+                        introduced, is_open = event.introduced, True
+                    elif is_open and (event.fixed or event.last_affected):
+                        ranges.append(
+                            AffectedRange(
+                                introduced=introduced,
+                                fixed=event.fixed,
+                                last_affected=None if event.fixed else event.last_affected,
+                            )
+                        )
+                        introduced, is_open = None, False
+                if is_open:
+                    ranges.append(AffectedRange(introduced=introduced))
+    unique = {(r.introduced, r.fixed, r.last_affected): r for r in ranges}
+    return list(unique.values())
+
+
+def _version_cmp(a: str, b: str, ecosystem: str | None) -> int:
+    """npm semver precedence when both versions parse (npm advisories), else ``version_key``."""
+    if (ecosystem or "").lower() in {"npm", ""}:
+        left, right = npm_semver.parse(a), npm_semver.parse(b)
+        if left is not None and right is not None:
+            return (left > right) - (left < right)
+    ka, kb = version_key(a), version_key(b)
+    return (ka > kb) - (ka < kb)
+
+
+def _in_range(version: str, rng: AffectedRange, ecosystem: str | None) -> bool:
+    if (
+        rng.introduced not in {None, "0"}
+        and _version_cmp(version, rng.introduced or "0", ecosystem) < 0
+    ):
+        return False
+    if rng.fixed is not None:
+        return _version_cmp(version, rng.fixed, ecosystem) < 0
+    if rng.last_affected is not None:
+        return _version_cmp(version, rng.last_affected, ecosystem) <= 0
+    return True
+
+
+def _same_branch(a: str, b: str) -> bool:
+    """Same major (or same 0.minor for 0.x), the branch a fixed release usually patches."""
+    left, right = version_key(a), version_key(b)
+    if not left or not right or left[0] != right[0]:
+        return False
+    if left[0] == (1, 0, ""):  # 0.x: the minor is the compatibility line
+        return len(left) > 1 and len(right) > 1 and left[1] == right[1]
+    return True
+
+
+def is_affected(version: str, details: VulnerabilityDetails) -> bool:
+    """Whether the advisory affects ``version`` of the finding's package.
+
+    Uses the OSV affected ranges when the finding carries them. Older stored findings only have
+    the fixed releases, so the fallback is conservative: a version counts as fixed only when it
+    is at or above a fixed release on its own branch (same major, or same 0.minor), or at or
+    above the highest fixed release. Without any fixed release every version is affected.
+    """
+    eco = details.ecosystem
+    if details.affected_ranges:
+        return any(_in_range(version, r, eco) for r in details.affected_ranges)
+    if details.version is not None and _version_cmp(version, details.version, eco) == 0:
+        return True
+    fixed = list(details.fixed_versions)
+    if details.recommended_fix and details.recommended_fix not in fixed:
+        fixed.append(details.recommended_fix)
+    if not fixed:
+        return True
+    highest = max(fixed, key=version_key)
+    if _version_cmp(version, highest, eco) >= 0:
+        return False
+    return not any(_same_branch(version, f) and _version_cmp(version, f, eco) >= 0 for f in fixed)
 
 
 def _recommended_fix(package: OsvPackageInfo, vulns: list[OsvVulnerability]) -> str | None:
@@ -331,6 +427,7 @@ def _finding(
             recommended_fix=_recommended_fix(package, vulns),
             published=min((v.published for v in vulns if v.published), default=None),
             references=[r.url for r in primary.references[:MAX_REFERENCES]],
+            affected_ranges=_affected_ranges(package, vulns),
         ),
         evidence=evidence,
     )

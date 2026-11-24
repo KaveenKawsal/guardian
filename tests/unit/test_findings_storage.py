@@ -160,7 +160,7 @@ def test_upgrades_a_version_1_database(tmp_path):
 
     with Database(path) as db:
         version = db.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == SCHEMA_VERSION == 3  # v1 -> v2 -> v3 in place
+        assert version == SCHEMA_VERSION  # v1 -> latest in place
         record = db.scans.get("old")  # phase 2 scans stay readable
         assert record.finding_count == 0
         assert db.findings.load("old") == []

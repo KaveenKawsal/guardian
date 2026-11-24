@@ -1,7 +1,15 @@
 import json
 from pathlib import Path
 
-from guardian.analysis.sbom import SbomGenerator, find_cdxgen_install, node_permission_options
+import pytest
+
+from guardian.analysis.sbom import (
+    SbomGenerator,
+    detect_node_version,
+    find_cdxgen_install,
+    node_permission_options,
+    permission_flag_for,
+)
 from guardian.execution.results import ToolResult, ToolStatus
 from guardian.execution.runner import ToolRunner
 
@@ -54,11 +62,71 @@ class RecordingRunner(ToolRunner):
         return ToolResult(tool=tool, args=list(args), status=self.status, exit_code=0)
 
 
+@pytest.mark.parametrize(
+    ("version", "flag"),
+    [
+        ("v26.13.1", "--permission"),
+        ("v24.0.0", "--permission"),
+        ("v23.5.0", "--permission"),
+        ("v23.4.0", "--experimental-permission"),
+        ("v22.13.0", "--permission"),
+        ("v22.12.0", "--experimental-permission"),
+        ("v20.20.2", "--experimental-permission"),
+        ("v18.20.0", None),
+        (None, "--permission"),
+        ("garbage", "--permission"),
+    ],
+)
+def test_permission_flag_for(version, flag):
+    assert permission_flag_for(version) == flag
+
+
+def test_detect_node_version_uses_runner(monkeypatch):
+    calls = []
+
+    def fake_run(self, tool, args, *, cwd, timeout_seconds=None, env=None):
+        calls.append((tool, list(args), self.policy.allowed_tools))
+        return ToolResult(tool=tool, args=list(args), status=ToolStatus.SUCCESS, stdout="v20.1.0\n")
+
+    monkeypatch.setattr(ToolRunner, "run", fake_run)
+    assert detect_node_version() == "v20.1.0"
+    assert calls == [("node", ["--version"], frozenset({"node"}))]
+
+
+def test_detect_node_version_missing(monkeypatch):
+    def fake_run(self, tool, args, *, cwd, timeout_seconds=None, env=None):
+        return ToolResult(tool=tool, args=list(args), status=ToolStatus.NOT_FOUND)
+
+    monkeypatch.setattr(ToolRunner, "run", fake_run)
+    assert detect_node_version() is None
+
+
+def test_generate_uses_experimental_flag_on_node_20(tmp_path):
+    runner = RecordingRunner(str(_fake_install(tmp_path)))
+    generation = SbomGenerator(runner, node_version=lambda: "v20.20.2").generate(
+        tmp_path / "repo", tmp_path
+    )
+    assert runner.calls[0]["env"]["NODE_OPTIONS"].startswith("--experimental-permission ")
+    assert generation.sandboxed
+
+
+def test_generate_without_permission_model_on_old_node(tmp_path):
+    runner = RecordingRunner(str(_fake_install(tmp_path)))
+    generation = SbomGenerator(runner, node_version=lambda: "v18.0.0").generate(
+        tmp_path / "repo", tmp_path
+    )
+    assert "NODE_OPTIONS" not in runner.calls[0]["env"]
+    assert not generation.sandboxed
+    assert "older than 20" in generation.warnings[0]
+
+
 def test_generate_sandboxed(tmp_path):
     runner = RecordingRunner(str(_fake_install(tmp_path)))
     work = tmp_path / "work"
     work.mkdir()
-    generation = SbomGenerator(runner).generate(tmp_path / "repo", work)
+    generation = SbomGenerator(runner, node_version=lambda: "v24.0.0").generate(
+        tmp_path / "repo", work
+    )
 
     call = runner.calls[0]
     assert call["args"][:3] == ["--no-install-deps", "--spec-version", "1.6"]

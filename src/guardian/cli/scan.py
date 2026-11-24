@@ -3,10 +3,12 @@
 import json
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
@@ -24,10 +26,18 @@ from guardian.core.models import (
     RepositoryProfile,
     ScanStatus,
     Severity,
+    ToolRunSummary,
 )
 from guardian.execution.policies import ExecutionPolicy
+from guardian.execution.results import ToolStatus
 from guardian.execution.runner import ToolRunner
-from guardian.orchestration.pipeline import ScanOutcome, ScanPipeline
+from guardian.orchestration.pipeline import (
+    NPM_LOCKFILE,
+    LockfileGenerator,
+    ScanOutcome,
+    ScanPipeline,
+)
+from guardian.remediation.runtime import docker_sandbox, lockfile_generator_for
 from guardian.sources import (
     InvalidTargetError,
     RemoteTarget,
@@ -101,7 +111,8 @@ def scan(  # noqa: PLR0913, PLR0917 - one parameter per CLI option
         try:
             with open_database(settings) as db:
                 progress.print(f"Scanning [bold]{escape(str(path.resolve()))}[/bold] ...")
-                outcome = ScanPipeline(db, settings).run(path)
+                generator = npm_lockfile_generator(path, settings, progress)
+                outcome = ScanPipeline(db, settings, lockfile_generator=generator).run(path)
                 if formats and outcome.record.status is not ScanStatus.FAILED:
                     # Before a --no-keep clone is deleted, so code snippets are still readable.
                     try:
@@ -126,7 +137,7 @@ def scan(  # noqa: PLR0913, PLR0917 - one parameter per CLI option
         typer.echo(json.dumps(payload, indent=2))
     else:
         render_scan(outcome)
-    for hint in lockfile_hints(outcome.profile):
+    for hint in lockfile_hints(outcome.profile, outcome.record.tool_runs):
         progress.print(f"[yellow]hint:[/yellow] {escape(hint)}")
     if clone_dir is not None:
         where = f"Clone kept at {clone_dir}" if keep else "Clone deleted (--no-keep)"
@@ -135,6 +146,38 @@ def scan(  # noqa: PLR0913, PLR0917 - one parameter per CLI option
     if report_error is not None:
         err_console.print(f"[red]error:[/red] report not written: {escape(str(report_error))}")
         raise typer.Exit(code=2)
+
+
+NPM_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml")
+DOCKER_DOWN_WARNING = (
+    "{reason}: start Docker Desktop to generate a lockfile; dependency scan will be partial "
+    "(package.json has no lockfile)."
+)
+
+
+def npm_lockfile_generator(
+    path: Path, settings: GuardianSettings, progress: Console
+) -> LockfileGenerator | None:
+    """The Docker lockfile hook for an npm project without a lockfile (e.g. Juice Shop).
+
+    None when generation is off, the project does not need it, or Docker is unavailable (then a
+    warning explains why the dependency scan will be partial).
+    """
+    if not settings.npm_lockfile_generation:
+        return None
+    if not (path / "package.json").is_file() or any((path / n).exists() for n in NPM_LOCKFILES):
+        return None
+    sandbox = docker_sandbox(settings)
+    ok, reason = sandbox.available()
+    if not ok:
+        warning = DOCKER_DOWN_WARNING.format(reason=reason)
+        progress.print(f"[yellow]warning:[/yellow] {escape(warning)}")
+        return None
+    progress.print(
+        "No npm lockfile: generating one in the Docker sandbox "
+        "(npm install --package-lock-only --ignore-scripts); your repository is not modified."
+    )
+    return lockfile_generator_for(settings, sandbox)
 
 
 def resolve_target(target: str | None, ref: str | None) -> Target:
@@ -172,8 +215,11 @@ _LOCK_COMMANDS = {
 }
 
 
-def lockfile_hints(profile: RepositoryProfile) -> list[str]:
-    """Suggest generating a lockfile when JS/Python manifests have none (shallow graph)."""
+def lockfile_hints(
+    profile: RepositoryProfile, tool_runs: Sequence[ToolRunSummary] = ()
+) -> list[str]:
+    """Explain an incomplete dependency graph when JS/Python manifests have no lockfile."""
+    npm_runs = [t for t in tool_runs if t.tool == NPM_LOCKFILE]
     hints = []
     for eco in profile.ecosystems:
         command = _LOCK_COMMANDS.get(eco.ecosystem)
@@ -184,10 +230,27 @@ def lockfile_hints(profile: RepositoryProfile) -> list[str]:
             Path(m.path).name.startswith("requirements") for m in manifests
         ):
             continue  # requirements files usually pin versions already
+        if eco.ecosystem is Ecosystem.NODE:
+            if npm_runs and npm_runs[-1].status == ToolStatus.SUCCESS.value:
+                continue  # generated in the sandbox; the scan saw the full tree
+            if npm_runs:
+                hints.append(
+                    "No npm lockfile, and generating one in the Docker sandbox failed (see the "
+                    "npm-lockfile tool run / warning above), so transitive dependencies are "
+                    "incomplete. Fix that error (is Docker Desktop running?) and rescan."
+                )
+            else:
+                hints.append(
+                    "No npm lockfile found, so transitive dependencies are incomplete. Start "
+                    "Docker Desktop and rescan: Guardian generates one in its sandbox "
+                    f"(`{command}`, nothing written to the repository; "
+                    "GUARDIAN_NPM_LOCKFILE_GENERATION must be on)."
+                )
+            continue
         hints.append(
             f"No {eco.ecosystem.value} lockfile found, so transitive dependencies are "
             f"incomplete. Generate one in the repository with `{command}` and rescan; "
-            "Guardian never runs package managers itself."
+            "Guardian does not run this package manager itself."
         )
     return hints
 

@@ -1,13 +1,18 @@
 """Runtime configuration, loaded from environment variables (``GUARDIAN_*``) and ``.env``."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from guardian.core.models import Priority
 
 LLMProvider = Literal["groq", "google"]
 LLM_PROVIDERS: tuple[LLMProvider, ...] = ("groq", "google")
+
+JiraTransitionEvent = Literal["approved", "declined", "verified", "validation_failed"]
+"""Case events that can move the Jira issue through its workflow (optional)."""
 
 
 def user_env_file() -> Path:
@@ -101,6 +106,61 @@ class GuardianSettings(BaseSettings):
     max_manifest_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
     excluded_dirs: frozenset[str] = DEFAULT_EXCLUDED_DIRS
 
+    # --- Jira human-in-the-loop (Milestone 4) -------------------------------------------
+    jira_base_url: HttpUrl | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GUARDIAN_JIRA_BASE_URL", "JIRA_BASE_URL", "jira_base_url"),
+        description="Jira Cloud site, e.g. https://example.atlassian.net (https only)",
+    )
+    jira_email: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GUARDIAN_JIRA_EMAIL", "JIRA_EMAIL", "jira_email"),
+    )
+    jira_api_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GUARDIAN_JIRA_API_TOKEN", "JIRA_API_TOKEN", "jira_api_token"
+        ),
+        repr=False,
+    )
+    jira_project_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GUARDIAN_JIRA_PROJECT_KEY", "JIRA_PROJECT_KEY", "jira_project_key"
+        ),
+    )
+    jira_issue_type: str = "Bug"
+    approvers: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description="Jira accountIds allowed to decide (GUARDIAN_APPROVERS, comma-separated)",
+    )
+    cli_approvers: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description="Local OS usernames allowed to run `guardian decide` (comma-separated)",
+    )
+    jira_min_priority: Priority = Priority.P2
+    jira_max_issues: int = Field(default=5, ge=0)
+    jira_poll_seconds: float = Field(default=30.0, gt=0)
+    jira_transitions: dict[JiraTransitionEvent, str] = Field(
+        default_factory=dict,
+        description='Optional workflow transitions, e.g. {"verified": "Done"} (JSON)',
+    )
+
+    # --- Remediation sandbox (Milestone 5) -----------------------------------------------
+    sandbox_cpus: str = Field(default="2", description="docker run --cpus")
+    sandbox_memory: str = Field(default="4g", description="docker run --memory")
+    sandbox_timeout_seconds: float = Field(
+        default=900.0, gt=0, description="Wall-clock limit per sandbox step (install/build/test)"
+    )
+    npm_lockfile_generation: bool = Field(
+        default=True,
+        description="Generate a missing package-lock.json in the Docker sandbox before scanning",
+    )
+    unsafe_host_validation: bool = Field(
+        default=False,
+        description="UNSAFE: build and test on the host when Docker is unavailable",
+    )
+
     @field_validator("llm_provider", "llm_model", mode="before")
     @classmethod
     def _blank_is_none(cls, value: object) -> object:
@@ -109,7 +169,7 @@ class GuardianSettings(BaseSettings):
             return value.lower() if value and value.lower() in LLM_PROVIDERS else value or None
         return value
 
-    @field_validator("groq_api_key", "google_api_key", mode="before")
+    @field_validator("groq_api_key", "google_api_key", "jira_api_token", mode="before")
     @classmethod
     def _blank_key_is_none(cls, value: object) -> object:
         raw = value.get_secret_value() if isinstance(value, SecretStr) else value
@@ -117,6 +177,50 @@ class GuardianSettings(BaseSettings):
             raw = raw.strip()
             return SecretStr(raw) if raw else None
         return value
+
+    @field_validator("jira_base_url", mode="before")
+    @classmethod
+    def _https_jira_url(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip().rstrip("/")
+            if not value:
+                return None
+            if not value.lower().startswith("https://"):
+                msg = "JIRA_BASE_URL must use https://"
+                raise ValueError(msg)
+        return value
+
+    @field_validator("jira_email", "jira_project_key", mode="before")
+    @classmethod
+    def _blank_text_is_none(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @field_validator("approvers", "cli_approvers", mode="before")
+    @classmethod
+    def _comma_separated(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+    @field_validator("jira_min_priority", mode="before")
+    @classmethod
+    def _parse_priority(cls, value: object) -> object:
+        if isinstance(value, str):
+            return Priority.parse(value)
+        return value
+
+    @property
+    def jira_configured(self) -> bool:
+        return None not in (
+            self.jira_base_url,
+            self.jira_email,
+            self.jira_api_token,
+            self.jira_project_key,
+        )
 
     @property
     def database_path(self) -> Path:

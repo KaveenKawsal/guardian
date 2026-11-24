@@ -1,6 +1,12 @@
 {
   "version": 2,
   "skills": {
+    "cvss-scoring": {
+      "source": "trailofbits/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/cvss-scoring/skills/cvss-scoring/SKILL.md",
+      "computedHash": "5a3083ce770c7f59ef6dece01c85e9d10a21ff7eae86d4b7fca806c6bce8d299"
+    },
     "differential-review": {
       "source": "trailofbits/skills",
       "commit": "149d7b21f4067765b82e67029730b42d228ef4b4",
@@ -15,12 +21,23 @@
       "skillPath": "skills/find-skills/SKILL.md",
       "computedHash": "7bc223e2aafbdbf6e50ea243ba6ef67fe432bb069ab439fea0390795dac0bf7f"
     },
+    "fp-check": {
+      "source": "trailofbits/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/fp-check/skills/fp-check/SKILL.md",
+      "computedHash": "b84703ecb023c8bfc77f08d79b932a5f4baf0a3d716550117dcbd7b0e48c81a6"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "89496d5dd00f4810205f351759594fc2742bf8eea85a2f2b2d1de59f4bd91576"
+    },
     "langchain-build-agent": {
       "source": "langchain-ai/langchain-skills",
-      "commit": "c2e54d1c6240d8aa28dd94142f3f6149fbb93bc8",
       "sourceType": "github",
       "skillPath": "skills/langchain-build-agent/SKILL.md",
-      "computedHash": "f61047ed2866022d3b816a93498b15280854b5ab4e6dd199eae902e18598440d"
+      "computedHash": "e021558829fbd333dbf5738bc670c93ed743ee7218f2d5a9ac24cd5971555def"
     },
     "modern-python": {
       "source": "trailofbits/skills",
@@ -70,6 +87,12 @@
       "sourceType": "github",
       "skillPath": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor/SKILL.md",
       "computedHash": "8a15fe1e5cb75e02781bcf4d823a3ea32095c2e16c964c49182312f666aff866"
+    },
+    "vulnerability-triage-brocards": {
+      "source": "trailofbits/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/vulnerability-triage-brocards/skills/vulnerability-triage-brocards/SKILL.md",
+      "computedHash": "c32d1a734891f45abe2df44cea528046949e2510ddd31649999d3b02ced77b2a"
     }
   }
 }

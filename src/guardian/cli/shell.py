@@ -30,7 +30,13 @@ from guardian.cli.findings import explain as explain_command
 from guardian.cli.findings import findings as findings_command
 from guardian.cli.graph import graph as graph_command
 from guardian.cli.history import history as history_command
-from guardian.cli.scan import _clone_runner, lockfile_hints, render_scan, resolve_target
+from guardian.cli.scan import (
+    _clone_runner,
+    lockfile_hints,
+    npm_lockfile_generator,
+    render_scan,
+    resolve_target,
+)
 from guardian.cli.shell_input import PROMPT, LineReader, PlainReader, PromptReader
 from guardian.core.config import LLM_PROVIDERS, GuardianSettings
 from guardian.core.exceptions import ConfigurationError, GuardianError
@@ -283,9 +289,10 @@ class GuardianShell:
             open_database(settings) as db,
             console.status(f"Scanning {escape(str(path.resolve()))} ..."),
         ):
-            outcome = ScanPipeline(db, settings).run(path)
+            generator = npm_lockfile_generator(path, settings, console)
+            outcome = ScanPipeline(db, settings, lockfile_generator=generator).run(path)
         render_scan(outcome)
-        for hint in lockfile_hints(outcome.profile):
+        for hint in lockfile_hints(outcome.profile, outcome.record.tool_runs):
             console.print(f"[yellow]hint:[/yellow] {escape(hint)}")
         self.select(outcome.record)
 

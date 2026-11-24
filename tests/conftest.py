@@ -11,6 +11,13 @@ from guardian.core.profiler import walk_repository
 MakeRepo = Callable[[dict[str, str]], Path]  # 3.11-compatible alias (no `type` statement)
 
 
+@pytest.fixture(autouse=True)
+def _no_docker_lockfiles(monkeypatch):
+    """Tests never start real containers: `guardian scan` would otherwise generate a missing
+    npm lockfile in Docker. Tests that exercise the hook enable it explicitly."""
+    monkeypatch.setenv("GUARDIAN_NPM_LOCKFILE_GENERATION", "false")
+
+
 @pytest.fixture
 def make_repo(tmp_path: Path) -> MakeRepo:
     """Create a repository from {relative_path: content} and return its root."""
