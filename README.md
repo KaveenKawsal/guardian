@@ -1,216 +1,172 @@
 # Guardian
 
-AI-powered repository security intelligence. Guardian combines deterministic security
-scanners, codebase understanding, dependency and code knowledge graphs, and specialised AI
-investigators to identify, contextualise, prioritise and explain security risks.
+**Repository supply-chain security, from detection to verified remediation, with a human in the loop.**
 
-> Status: **Phase 4 (Codebase understanding)** complete: dependency intelligence, known
-> vulnerabilities (OSV-Scanner), insecure code patterns (Semgrep), security-relevant git
-> changes, evidence records, an interactive dependency graph, and a Tree-sitter index of the
-> repository's own source that puts findings in code context. Next: phase 5, AI investigation.
+Guardian scans a repository, prioritises its risks with explainable scores, has AI investigators
+explain them, and proposes fixes. Fixes are applied only after a recorded human decision. Guardian
+then builds and tests the fix in a sandbox, rescans, and reports a verdict with a tamper-evident
+audit trail.
+
+```
+Prioritised risk → Recommended fix → Human approval (Jira / local console) → Apply in isolated branch
+→ Sandboxed build & test → Rescan → Before/after comparison → Verdict → Report + audit trail
+```
+
+## Principles
+
+1. **The scanned repository is hostile.** Its files, git config, advisories and tool output are
+   untrusted data and are never executed on the host or treated as instructions.
+2. **Deterministic tools establish facts; the LLM interprets.** The AI never decides whether a
+   version is vulnerable, never invents a fix version and never approves anything.
+3. **The AI chooses only from enumerated candidates and cites evidence.** Output that references
+   an unknown candidate, file or finding is rejected.
+4. **No change without a recorded human decision.** Changes are made only in a `guardian/fix-*`
+   git worktree, never on your working tree, and never pushed.
+5. **Unknown stays unknown.** Missing evidence lowers confidence; it is never guessed. AI output
+   is always labelled *inference*, separate from *verified* facts.
+6. **Everything degrades gracefully.** A missing scanner gives a *partial* scan; no Docker gives an
+   `UNVERIFIED` verdict; no API key gives deterministic plans.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Scan["Deterministic scan"]
+    P[Profiler + adapters] --> L[npm lockfile<br/>Docker sandbox] --> S[cdxgen SBOM]
+    S --> O[OSV-Scanner] & G[Semgrep] & H[git history] & I[Tree-sitter index]
+    O & G & H & I --> K[Knowledge graph] --> R[Risk scoring]
+  end
+  subgraph AI["AI investigators · LangGraph fan-out"]
+    A[Architect] & D[Dependency] & V[Vulnerability] & C[Code] --> E[Evidence Correlator]
+  end
+  subgraph Fix["Remediation graph · durable, interrupt/resume"]
+    CA[Candidates + plan] --> J[Publish: Jira] --> HD{{Human decision}}
+    HD -->|accept / modify| AP[Apply in worktree] --> SB[Sandbox build + test] --> RS[Rescan + diff] --> VD[Verdict]
+    HD -->|decline| AR[Record accepted risk]
+    VD -->|not verified| HD
+  end
+  R --> AI --> CA
+  R --> CA
+```
+
+| Stage | What happens | Key modules |
+|---|---|---|
+| Scan | Profile, SBOM, vulnerabilities, code patterns, git changes, source index, knowledge graph | `orchestration/pipeline.py`, `analysis/*`, `indexing/*`, `knowledge/graph_builder.py` |
+| Prioritise | R = 0.35 S + 0.25 E + 0.20 X + 0.10 P + 0.10 F → P1–P4 with confidence and per-factor rationale | `knowledge/risk.py` |
+| Investigate | Five structured-output agents; every claim must cite input evidence | `investigation/*`, `orchestration/investigation_graph.py` |
+| Recommend | Registry-verified upgrade / parent upgrade / override / remove / block / escalate, each with risk reduction, compatibility notes and rollback | `remediation/candidates.py`, `remediation/planner.py` |
+| Decide | Jira comment (`/guardian accept`) or local console; strict parser + approver allowlist | `integrations/jira/*`, `ui/*`, `cli/decide.py` |
+| Apply · validate · verify | Worktree commit → Docker install/build/test (no network for build/test) → rescan → SBOM and findings diff → `VERIFIED` / `PARTIALLY_VERIFIED` / `FAILED` / `UNVERIFIED` | `remediation/apply.py`, `sandbox.py`, `validate.py`, `verify.py` |
+| Orchestrate | One LangGraph thread per case, `SqliteSaver` checkpoints survive restarts | `orchestration/remediation_graph.py`, `remediation/runtime.py` |
+| Audit | Append-only, SHA-256 hash-chained event log for every state change | `storage/audit.py` |
 
 ## Quick start
 
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.11+.
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and optionally Docker Desktop (sandbox),
+`cdxgen`, `osv-scanner` and `semgrep`.
 
 ```bash
 uv sync
-npm install -g @cyclonedx/cdxgen             # SBOM generator
-winget install Google.OSVScanner             # known-vulnerability matching (or see osv.dev)
-uv tool install semgrep                      # static analysis
-# Every tool is optional: a missing one makes the scan "partial" instead of failing it.
-
-uv run guardian                              # interactive shell (see below)
-uv run guardian scan ./my-project            # profile + SBOM + dependency graph, stored in ~/.guardian
-uv run guardian scan ./my-project --report   # ...and write an HTML review report
-uv run guardian report -f html,md,json       # review reports for the latest scan (./guardian-reports)
-uv run guardian scan https://github.com/juice-shop/juice-shop   # clone a public HTTPS repo, then scan it
-uv run guardian scan juice-shop/juice-shop --ref v17.0.0        # GitHub shorthand, branch or tag
-uv run guardian scan                         # in a terminal: prompts for a URL or local path
-uv run guardian findings                     # security findings of the latest scan, worst first
-uv run guardian findings -k code -s high     # filter by kind and minimum severity
-uv run guardian explain <finding-id>         # facts, evidence chain, how it enters, remediation
-uv run guardian graph -o graph/              # interactive dependency graph (open graph/index.html)
-uv run guardian deps                         # direct dependencies of the latest scan
-uv run guardian deps --all                   # every component, with depth and declaring manifest
-uv run guardian deps --why mime-db           # how a package entered the dependency tree
-uv run guardian code                         # codebase index: files, symbols, imports, entry points
-uv run guardian code --uses lodash           # where the source imports and calls a package
-uv run guardian code --entry-points          # routes, servers, main guards, package entry points
-uv run guardian history                      # previous scans
-uv run guardian profile ./my-project --json  # profile only, no storage
-uv run guardian doctor                       # check external tools
+npm install -g @cyclonedx/cdxgen && uv tool install semgrep   # plus osv-scanner (osv.dev)
+cp .env.example .env                  # add GUARDIAN_CLI_APPROVERS=<your OS user>; keys optional
+uv run guardian doctor                # checks tools, Docker, Jira, LLM keys, checkpoint store
 ```
 
-### Interactive shell
+End-to-end on a local repository (e.g. a clone of OWASP Juice Shop):
 
-Run `guardian` with no arguments in a terminal (or `guardian shell`):
+```bash
+uv run guardian scan ~/code/juice-shop                       # scan + prioritise (lockfile made in sandbox)
+uv run guardian investigate latest --top 5 --max-calls 30    # AI investigators (use --no-ai to skip)
+uv run guardian remediate latest --top 5 --min-priority HIGH # cases with recommended fixes
+uv run guardian ui                                           # local review console: decide, watch, audit
+uv run guardian audit verify                                 # check the audit hash chain
+```
+
+See [`docs/demo/day2-runbook.md`](docs/demo/day2-runbook.md) for the full demo script.
+
+## Commands
+
+| Area | Commands |
+|---|---|
+| Scan and explore | `scan <path\|url>`, `findings`, `explain <id>`, `deps`, `code`, `graph`, `profile`, `history`, `report` |
+| AI | `investigate`, `ai status\|models\|test\|use`, `shell` (interactive, read-only assistant) |
+| Remediation | `remediate`, `cases`, `case <id>`, `decide <id> accept\|modify\|decline\|revalidate`, `validate <id>` |
+| Human-in-the-loop | `jira push\|sync [--watch]\|status`, `ui` |
+| Operations | `audit verify`, `doctor [--online]` |
+
+Jira decisions are comments whose first line starts with `/guardian`:
 
 ```text
-guardian> C:\code\my-api                       # paste a folder path: scans it
-guardian> https://github.com/OWASP/NodeGoat    # or a repository URL / owner/repo
-guardian> which findings should I fix first?   # plain questions go to the AI assistant
-guardian> /report md,html                      # write review reports for the current scan
+/guardian accept [candidate=<id>]
+/guardian modify version=<x.y.z> | action=<PIN|REMOVE|...> | branch=<ref> | commit=<sha>
+/guardian decline reason=false_positive|accepted_risk|wont_fix|duplicate [until=YYYY-MM-DD] -- <why>
+/guardian revalidate
 ```
 
-Slash commands (Tab completes): `/scan`, `/summary`, `/findings`, `/explain <id>`, `/deps`,
-`/code`, `/graph`, `/report`, `/history`, `/use <scan>`, `/model [groq|google] [model]`,
-`/clear`, `/doctor`, `/help`, `/exit`. The assistant answers only through read-only tools over
-the stored scan, cites finding ids and `file:line`, and treats everything from the scanned
-repository as untrusted data, never as instructions. Without an API key the shell still works;
-only questions are unavailable.
+## Configuration
 
-### Review reports
+Settings come from environment variables, `./.env` and `~/.guardian/.env` (git-ignored). Data,
+checkpoints, worktrees and logs live in `~/.guardian/`.
 
-`guardian report` writes, per scan, to `./guardian-reports/`:
+| Variable | Purpose |
+|---|---|
+| `GROQ_API_KEY`, `GOOGLE_API_KEY`, `GUARDIAN_LLM_PROVIDER` | LLM providers (optional) |
+| `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY` | Jira Cloud (optional) |
+| `GUARDIAN_APPROVERS` / `GUARDIAN_CLI_APPROVERS` | Jira account IDs / local OS users allowed to decide |
+| `GUARDIAN_JIRA_MIN_PRIORITY`, `GUARDIAN_JIRA_MAX_ISSUES` | Publishing cap (default HIGH, 5) |
+| `GUARDIAN_SANDBOX_CPUS`, `GUARDIAN_SANDBOX_MEMORY`, `GUARDIAN_SANDBOX_TIMEOUT_SECONDS` | Docker limits |
 
-- **HTML**: one self-contained file (no network). Findings are ranked P1–P4 with
-  the risk score, each factor's evidence, dependency chains, redacted code with line numbers,
-  and remediation. You can filter findings and set a verdict per finding (confirmed / false
-  positive / needs review / accepted risk) with notes. Verdicts are kept in your browser, and
-  you can export them as JSON and import them back.
-- **Markdown**: the same content with reviewer checkboxes, for tickets and pull requests.
-- **JSON**: the full machine-readable report (`schema_version` "1").
+Secrets are held as `SecretStr`, never logged, stored, sent to the LLM, or passed to any subprocess.
 
-Risk scores use the Guardian heuristic R = 0.35 S + 0.25 E + 0.20 X + 0.10 P + 0.10 F, with
-severity, exposure, exploitability, reachability and fix availability. A factor without
-evidence is "unknown". It lowers the confidence, not the score. Exploitability stays unknown
-until AI investigation (phase 5). Only critical or high severity findings can be P1.
+## Security model
 
-### AI providers (Groq or Google Gemini)
+- **Tool execution:** one choke point (`execution/runner.py`): allowlisted binaries, no shell,
+  scrubbed environment, timeouts, bounded output; git runs with hooks, fsmonitor, external diff,
+  pagers and credential helpers disabled.
+- **cdxgen** runs in secure mode with `--no-install-deps` under the Node.js permission model
+  (flag chosen per Node version). OSV-Scanner sends only package names and versions.
+- **Sandbox:** non-root, `--cap-drop ALL`, `no-new-privileges`, read-only root, CPU/memory/pids
+  limits, no host env, no Docker socket, a disposable copy instead of a mount of your repo.
+  Install scripts are disabled; build and tests run with `--network none`.
+- **LLM:** repository and Jira text is wrapped in delimited data blocks, secrets are redacted,
+  context is bounded, and outputs are validated against the input's IDs.
+- **Console:** binds to 127.0.0.1, per-launch token, Host/Origin checks, strict CSP, text-only
+  rendering of untrusted content.
 
-AI investigation (phase 5) uses your own API key; deterministic analysis works without one.
-Copy `.env.example` to `.env` (git-ignored) or `~/.guardian/.env` (works from any directory)
-and paste your keys:
+## Project layout
 
-```bash
-GROQ_API_KEY=...      # https://console.groq.com/keys
-GOOGLE_API_KEY=...    # https://aistudio.google.com/apikey (GEMINI_API_KEY also works)
 ```
-
-```bash
-uv run guardian ai status                    # which keys are set (masked) and the active model
-uv run guardian ai models                    # live model list from the active provider
-uv run guardian ai test                      # one tiny round-trip to confirm the key works
-uv run guardian ai use google --model gemini-3.5-flash   # switch provider and/or model
+src/guardian/
+  cli/            Typer commands and the interactive shell
+  core/           settings, Pydantic models (scan + remediation), profiler, exceptions
+  adapters/       ecosystem detection and manifest edits (Python, Node, Java, containers)
+  execution/      hardened tool runner and execution policies
+  analysis/       cdxgen, CycloneDX, OSV-Scanner (+ affected ranges), Semgrep, git analysis
+  indexing/       Tree-sitter symbols, imports, calls, entry points, code retrieval
+  knowledge/      knowledge graph, graph queries, risk scoring
+  investigation/  AI investigator schemas, prompts, evidence validation, budgeted runner
+  remediation/    candidates, npm semver/registry, planner, cases, apply, sandbox, validate, verify, runtime
+  orchestration/  scan pipeline, investigation graph, remediation graph, checkpoints
+  integrations/   Jira client, ADF, publishing, command parser, sync, write-back
+  llm/            Groq / Gemini providers and model catalog
+  assistant/      read-only tool-calling assistant for the shell
+  storage/        SQLite stores and migrations 001–006 (scans, findings, cases, audit, investigations)
+  reporting/      HTML / Markdown / JSON reports and graph export
+  ui/             local review console (stdlib HTTP server + static app)
+  sources/        safe cloning of remote repositories
+docker/           dependency-image Dockerfile for the sandbox
+docs/decisions/   architecture decision records (01–11)
+docs/demo/        demo runbook
+tests/            unit, integration and e2e tests (Jira and LLM calls are mocked)
 ```
-
-Keys are never printed, stored in Guardian's database, or passed to scanner subprocesses.
-
-Remote targets are cloned (shallow, no submodules, no hooks, symlinks checked out as plain
-files, HTTPS only) into `~/.guardian/workspaces/<hash>/<repo>`; the same repository always
-lands in the same directory, so `guardian history` groups its scans. The clone is kept so
-`guardian explain` and `guardian code` can read files later; pass `--no-keep` to delete it
-after the scan. `http://`, `ssh://`, `git@`, `file://`, `ext::` and URLs with embedded
-credentials are rejected. Repositories without a lockfile (e.g. OWASP Juice Shop) give a
-shallow dependency graph: generate one yourself with
-`npm install --package-lock-only --ignore-scripts`; Guardian never runs package managers.
 
 ## Development
 
 ```bash
-uv run pytest                 # tests + coverage (80% minimum)
-uv run ruff format src tests
-uv run ruff check src tests
+uv run pytest                     # tests + coverage gate (80%)
+uv run ruff check src tests && uv run ruff format src tests
 uv run ty check src
 ```
 
-## Layout
-
-| Package | Responsibility |
-|---|---|
-| `guardian.cli` | Typer commands (`scan`, `findings`, `explain`, `graph`, `deps`, `code`, `history`, `profile`, `doctor`) |
-| `guardian.core` | Settings, Pydantic models, profiler, adapter registry, exceptions |
-| `guardian.adapters` | Ecosystem detection: Python, Node.js, Java, containers |
-| `guardian.execution` | Sandboxed external tool runner and execution policies |
-| `guardian.analysis` | cdxgen SBOMs, CycloneDX parsing, OSV-Scanner, Semgrep, git change analysis |
-| `guardian.knowledge` | NetworkX knowledge graph (dependencies, findings, changes) and queries |
-| `guardian.indexing` | Tree-sitter symbols, imports and calls (Python, JS/TS), resolution to files and SBOM packages, entry points, incremental cache |
-| `guardian.reporting` | Interactive HTML dependency graph export |
-| `guardian.storage` | SQLite persistence with versioned migrations: scans, SBOMs, findings, changes |
-| `guardian.orchestration` | Deterministic scan pipeline (LangGraph arrives in phase 5) |
-
-## How direct dependencies are determined
-
-Each SBOM records which method was used (`direct_source`):
-
-1. `sbom`: the SBOM links its root to the direct dependencies (cdxgen does this for npm).
-2. `manifest`: matched against names Guardian parsed from `pyproject.toml`,
-   `requirements*.txt` and `package.json` (cdxgen omits root links for uv/Poetry projects).
-3. `sbom+manifest`: the union, for polyglot repositories.
-4. `graph-inference`: last resort, packages nothing else depends on; flagged with a warning
-   because it misses packages that are both direct and transitive.
-5. `unknown`: no dependency graph; `direct` is left null rather than guessed.
-
-## Security model for scanning untrusted repositories
-
-- The file walk never follows symlinks or junctions and skips vendored/build directories.
-- Manifests are read with a size cap; malformed files produce warnings, not crashes.
-- External tools run from an allowlist, without a shell, with a scrubbed environment
-  (no API keys or cloud credentials), a timeout and bounded output.
-- `git` runs with repo-local config neutralised (`core.fsmonitor`, hooks, `diff.external`,
-  pager, protocols, credential helpers), so a hostile `.git/config` cannot execute code.
-- cdxgen runs in secure mode with `--no-install-deps` (no package installs, so no install
-  scripts) and under the Node.js permission model: read access only to the repository, its own
-  install and temp; write access only to temp. The SBOM is written outside the repository.
-- The git hardening is also exported as `GIT_CONFIG_*` variables to every tool, because
-  scanners such as Semgrep run `git` inside the repository themselves.
-- OSV-Scanner runs with `--no-resolve` (no network manifest resolution) and
-  `--no-call-analysis=all` (Rust call analysis would run build scripts). It sends package
-  names and versions, never source code, to api.osv.dev.
-- Semgrep runs the OSS engine with metrics off and ignores the repository's `.gitignore`. A
-  repository-provided `.semgrepignore` cannot be disabled, so its patterns are reported.
-- Matched source text is never stored: code findings keep a hash of it, so a secret matched
-  by a rule never reaches Guardian's database or reports. Author emails are never collected.
-- Text from the scanned repository or from advisories is escaped before it reaches the
-  terminal, and the HTML graph renders it as text only.
-
-## Findings
-
-Every finding has a stable id (the same issue keeps its id across scans), a severity, the tool
-that established it, and evidence records:
-
-| Kind | Source | Evidence |
-|---|---|---|
-| `vulnerability` | OSV-Scanner on Guardian's SBOM | advisory, tool match, declaring manifest; linked to the exact component, with the recommended fixed version |
-| `code` | Semgrep | source location; the commit that last touched the lines (`git blame`) |
-| `change` | git history | commit, author name, files: lockfile changed without its manifest, CI/CD or container config changed, secret-bearing files committed, security-sensitive code changed, uncommitted dependency changes |
-
-Deterministic tools establish these facts. Phase 5 adds AI investigation of relevance,
-reachability and exploitability on top.
-
-## Codebase understanding
-
-Every scan indexes the repository's own source with Tree-sitter (no code is imported or
-executed), alongside the security scanners:
-
-- **What is indexed**: Python, JavaScript, TypeScript and TSX files: symbols (classes,
-  functions, methods with their spans), imports (`import`/`from`, ES modules, `require`,
-  dynamic imports), call sites, and entry points (`__main__` guards, `__main__.py`,
-  `package.json` main/bin, `[project.scripts]`, HTTP routes, server `listen`/`run` calls).
-- **Resolution**: imports resolve to repository files, the standard library / Node built-ins,
-  or third-party packages matched to the exact SBOM component; calls resolve to internal
-  symbols or to members of those packages (e.g. `lodash.template`).
-- **Incremental**: per-file results are cached by content hash in the Guardian database, so
-  rescanning a repository only re-parses changed files. Oversized, minified and unreadable
-  files are skipped and counted; limits are `max_source_bytes` and `max_indexed_files`, and
-  `index_source=false` disables indexing.
-- **Code context on findings**: code findings name the innermost enclosing symbol
-  (`guardian explain` shows `Symbol: app/api.py::UserService.login`), and vulnerability
-  findings gain `code-usage` evidence: the files and lines importing the vulnerable package and
-  the members called (`Imported in 2 file(s): src/a.ts:3, src/b.ts:9; calls: template (2)`),
-  or that the source does not import it directly.
-
-An indexing failure never fails the scan: it is recorded as an errored `indexer` run and the
-scan is marked partial.
-
-## Roadmap
-
-| Phase | Scope | Status |
-|---|---|---|
-| 1. Foundation | CLI, repository profiler, adapters, safe tool execution | Done |
-| 2. Dependency intelligence | cdxgen SBOM, CycloneDX parsing, dependency graph, SQLite history | Done |
-| 3. Security detection | OSV-Scanner, Semgrep, git change analysis, evidence, graph view | Done |
-| 4. Codebase understanding | Tree-sitter symbols, imports, calls, entry points, code retrieval | Done |
-| 5. AI investigation | LangGraph specialist agents, evidence correlation, risk scoring | Planned |
-| 6. Incremental scanning and demo | Scan comparison, JSON/HTML reports, demo scenarios | Planned |
+Design rationale and trade-offs are recorded in [`docs/decisions/`](docs/decisions/README.md);
+[ADR 11](docs/decisions/11-human-approved-remediation.md) covers human-approved remediation.
