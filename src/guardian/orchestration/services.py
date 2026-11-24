@@ -7,7 +7,8 @@ replayed after a crash or a resume, and it will call the service again.
 
 Failure contract: a method raises a ``GuardianError`` subclass for a *domain* failure (the patch
 does not apply, the sandbox refused the build). The graph routes ``apply``/``validate`` domain
-failures to ``VALIDATION_FAILED`` and back to human review. Any other exception is treated as a
+failures to ``VALIDATION_FAILED`` and back to human review; an ``open_pr`` domain failure is
+recorded (``pr:failed``) and the case still closes as VERIFIED. Any other exception is treated as a
 crash: it propagates, the checkpoint keeps the node pending, and ``continue_case`` retries it.
 """
 
@@ -39,6 +40,11 @@ class RemediationServices(Protocol):
 
     def verify(self, case_id: str, applied: dict, validation: dict) -> dict:
         """Rescan the worktree and compare; return ``VerificationResult`` JSON."""
+        ...
+
+    def open_pr(self, case_id: str, applied: dict, verification: dict) -> dict | None:
+        """Push ``guardian/fix-<case>`` and open (or find) its pull request after a VERIFIED
+        verdict; return ``{"url", "number", ...}``, or None when pull requests are disabled."""
         ...
 
     def record_acceptance(self, case_id: str, decision: HumanDecision) -> None:

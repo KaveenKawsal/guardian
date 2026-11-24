@@ -20,6 +20,8 @@ class RemediationState(TypedDict, total=False):
     """``AppliedChange`` as JSON, or ``{"error": ...}`` when the change could not be applied."""
     validation: dict | None
     verification: dict | None
+    pull_request: dict | None
+    """``{"url", "number", ...}`` once ``open_pr`` opened or found the pull request."""
     jira_key: str | None
     last_event: str | None
     error: str | None

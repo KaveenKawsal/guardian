@@ -136,6 +136,13 @@ def print_run_result(settings: GuardianSettings, result: RunResult) -> None:
         case = db.remediation.get(result.case_id)
     console.print(f"Case {case.id} is now [bold]{case.status.value}[/bold].")
     values = result.values
+    applied = values.get("applied") or {}
+    if applied.get("commit_sha"):
+        console.print(
+            f"Local commit: [bold]{escape(str(applied['commit_sha']))}[/bold] on "
+            f"{escape(str(applied.get('branch', '')))} (worktree "
+            f"{escape(str(applied.get('worktree_path', '')))}; never pushed)"
+        )
     verification = values.get("verification") or {}
     if verification.get("status"):
         console.print(
@@ -149,6 +156,17 @@ def print_run_result(settings: GuardianSettings, result: RunResult) -> None:
     for step in validation.get("steps") or []:
         detail = f" ({step.get('detail')})" if step.get("detail") else ""
         console.print(f"  {step.get('name')}: {step.get('status')}{detail}", markup=False)
+    pull_request = values.get("pull_request") or {}
+    if pull_request.get("url"):
+        console.print(
+            f"Pull request: {escape(str(pull_request['url']))} "
+            f"({'draft, ' if pull_request.get('draft') else ''}Guardian never merges)"
+        )
+    elif values.get("last_event") == "pr_failed":
+        console.print(
+            "[yellow]Pull request not opened[/yellow] (the fix is still VERIFIED); "
+            f"see `guardian case {case.id}`."
+        )
     if values.get("error") and result.interrupt is not None:
         console.print(f"[yellow]Returned to review:[/yellow] {escape(str(values['error']))}")
     if result.interrupt is not None:

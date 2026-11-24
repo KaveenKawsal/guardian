@@ -407,6 +407,7 @@ def test_health_has_no_secrets(env):
         "db_error": None,
         "jira_configured": False,
         "cli_approvers_configured": True,
+        "pr_enabled": False,
     }
     text = response.body.decode()
     for secret in ("gsk_secret_value", "alice", "jira-acc-1", TOKEN):

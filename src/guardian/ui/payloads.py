@@ -8,6 +8,10 @@ from typing import Any
 from guardian.core.config import GuardianSettings
 from guardian.core.models import Finding, RiskAssessment
 from guardian.core.remediation_models import RemediationCase
+from guardian.execution.runner import ToolRunner
+from guardian.integrations.decisions import revalidate_ready
+from guardian.integrations.github.records import pull_request_of
+from guardian.remediation.compatibility import fix_compatibility
 from guardian.storage.database import Database
 from guardian.storage.findings import FindingNotFoundError
 from guardian.ui.investigation import case_investigation
@@ -134,6 +138,7 @@ def case_detail(
         risk_note = None if risk_json else "No risk assessment for this case's findings."
 
     chosen = plan.chosen_candidate_id if plan is not None else None
+    pull_request = pull_request_of(events)
     return {
         "case": case_summary(case, settings, pending=pending)
         | {
@@ -154,6 +159,10 @@ def case_detail(
         "decisions": [d.model_dump(mode="json") for d in decisions],
         "validations": [v.model_dump(mode="json") for v in validations],
         "verifications": [v.model_dump(mode="json") for v in verifications],
+        "pull_request": pull_request,
+        "compatibility": _compatibility(db, case.id),
+        "can_revalidate": case.status.value == "AWAITING_DECISION"
+        and revalidate_ready(db, case.id),
         "jira": (
             {
                 "issue_key": link.issue_key,
@@ -178,6 +187,15 @@ def case_detail(
     }
 
 
+def _compatibility(db: Database, case_id: str) -> list[dict[str, Any]]:
+    """This fix checked against the other fix branches (advisory; never fails the page)."""
+    try:
+        return [c.to_json() for c in fix_compatibility(db, case_id, ToolRunner())]
+    except Exception:
+        logger.warning("compatibility check failed for %s", case_id, exc_info=True)
+        return []
+
+
 def audit_status(db: Database) -> dict[str, Any]:
     ok, problems = db.audit.verify()
     count = db.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
@@ -191,4 +209,5 @@ def health(db: Database | None, settings: GuardianSettings, error: str | None) -
         "db_error": error,
         "jira_configured": settings.jira_configured,
         "cli_approvers_configured": bool(settings.cli_approvers),
+        "pr_enabled": settings.pr_enabled,
     }

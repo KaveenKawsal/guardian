@@ -212,6 +212,8 @@ class CallRecord(BaseModel):
     role: Role
     provider: str
     model: str
+    key_index: int | None = None
+    """Position in the provider's key pool (0 = primary key); never the key itself."""
     attempt: int = 1
     latency_seconds: float = 0.0
     input_chars: int = 0

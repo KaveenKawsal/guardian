@@ -15,7 +15,11 @@ from typing import Any
 
 from guardian.core.config import GuardianSettings
 from guardian.core.remediation_models import HumanDecision, RemediationCase
-from guardian.integrations.decisions import decision_applies, record_decision_transition
+from guardian.integrations.decisions import (
+    decision_applies,
+    record_decision_transition,
+    revalidate_ready,
+)
 from guardian.integrations.jira.authz import is_authorized_cli
 from guardian.integrations.jira.commands import (
     GRAMMAR_HELP,
@@ -163,7 +167,9 @@ class DecisionService:
             parsed = parse_command(line)
         except CommandParseError as exc:
             raise DecisionError(400, f"Could not parse the decision: {exc}", grammar=True) from exc
-        if not decision_applies(case, parsed.decision):
+        if not decision_applies(
+            case, parsed.decision, can_revalidate=revalidate_ready(db, case.id)
+        ):
             raise DecisionError(
                 409,
                 f"Case is {case.status.value}; a {parsed.decision.value.lower()} decision does "

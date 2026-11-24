@@ -194,3 +194,48 @@ def test_helpers(world, tmp_path):
     link.mkdir()
     (link / "package.json").symlink_to(world.root / "package.json")
     assert read_manifest(link) is None
+
+
+class AdvisoryRegistry(FakeRegistry):
+    """FakeRegistry plus a target-version advisory lookup."""
+
+    def __init__(self, known, **kwargs):
+        super().__init__(**kwargs)
+        self.known = known
+        self.lookups: list[str] = []
+
+    def advisories(self, name, version):
+        self.lookups.append(f"{name}@{version}")
+        return self.known(name, version)
+
+
+def test_override_skips_a_target_version_with_its_own_advisory(world):
+    # qs 6.7.3 fixes the case but has another advisory: prefer the next fixing version.
+    registry = AdvisoryRegistry(lambda _n, v: ["GHSA-other"] if v == "6.7.3" else [])
+    override = next(c for c in candidates_for(world, "qs", registry) if c.strategy == "override")
+    assert override.to_version == "6.9.7"
+    assert "skipped qs 6.7.3: itself affected by GHSA-other" in override.compatibility_notes
+    assert "OSV: no known advisory for qs 6.9.7" in override.compatibility_notes
+
+
+def test_unknown_advisories_keep_the_plain_choice(world):
+    registry = AdvisoryRegistry(lambda _n, _v: None)  # offline
+    override = next(c for c in candidates_for(world, "qs", registry) if c.strategy == "override")
+    assert override.to_version == "6.7.3"
+    assert not any("OSV" in n or "skipped" in n for n in override.compatibility_notes)
+
+
+def test_all_checked_versions_affected_falls_back_to_lowest_fix(world):
+    registry = AdvisoryRegistry(lambda _n, _v: ["GHSA-everywhere"])
+    override = next(c for c in candidates_for(world, "qs", registry) if c.strategy == "override")
+    assert override.to_version == "6.7.3"
+    assert "no checked qs version is free of advisories" in override.compatibility_notes
+
+
+def test_direct_upgrade_prefers_clean_version(world):
+    registry = AdvisoryRegistry(
+        lambda n, v: ["GHSA-x"] if (n, v) == ("jsonwebtoken", "9.0.0") else []
+    )
+    upgrades = by_action(candidates_for(world, "jsonwebtoken", registry), A.UPGRADE)
+    assert upgrades[0].to_version != "9.0.0"
+    assert any("skipped jsonwebtoken 9.0.0" in n for n in upgrades[0].compatibility_notes)

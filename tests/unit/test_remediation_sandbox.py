@@ -427,3 +427,55 @@ def test_work_dir_defaults_to_system_temp(monkeypatch, tmp_path):
         assert created.stat().st_mode & 0o777 == 0o700
     finally:
         created.rmdir()
+
+
+RESET = "npm error code ECONNRESET\nnpm error network aborted\n"
+
+
+def _builds(outputs):
+    """Handler: no image yet; each `docker build` returns the next (exit_code, output)."""
+    builds = []
+
+    def handler(tool, args, cwd):
+        if args[0] == "image":
+            return ok(tool, args, exit_code=1)
+        code, out = outputs[min(len(builds), len(outputs) - 1)]
+        builds.append(args)
+        return ok(tool, args, stdout=out, exit_code=code)
+
+    return handler, builds
+
+
+def test_install_retries_transient_network_errors(tmp_path, config):
+    deps, copy = _deps_dir(tmp_path), tmp_path / "copy"
+    copy.mkdir()
+    handler, builds = _builds([(1, RESET), (0, "done")])
+    image, step = DockerSandbox(FakeRunner(handler), config).install_dependencies(
+        deps, copy, name="x"
+    )
+    assert image is not None
+    assert step.status is StepStatus.PASSED
+    assert len(builds) == 2
+
+
+def test_install_gives_up_with_a_readable_network_reason(tmp_path, config):
+    deps, copy = _deps_dir(tmp_path), tmp_path / "copy"
+    copy.mkdir()
+    handler, builds = _builds([(1, RESET)])
+    image, step = DockerSandbox(FakeRunner(handler), config).install_dependencies(
+        deps, copy, name="x"
+    )
+    assert image is None
+    assert len(builds) == sandbox_module.INSTALL_ATTEMPTS
+    assert step.detail == (
+        "npm registry network error (ECONNRESET) after 3 attempts; re-validate to try again"
+    )
+
+
+def test_install_does_not_retry_real_failures(tmp_path, config):
+    deps, copy = _deps_dir(tmp_path), tmp_path / "copy"
+    copy.mkdir()
+    handler, builds = _builds([(1, "npm error code ERESOLVE\nconflicting peer dependency")])
+    _, step = DockerSandbox(FakeRunner(handler), config).install_dependencies(deps, copy, name="x")
+    assert len(builds) == 1
+    assert step.detail == "npm ci failed (ERESOLVE); see the install log"

@@ -247,3 +247,52 @@ def test_commit_message_strips_newlines(env):
     assert "Eve Guardian-Case: forged" in message
     assert message.count("Guardian-Case:") == 2  # the real trailer + the flattened text
     assert "Jira: SEC-1 x" in message
+
+
+def test_reapply_releases_branch_held_by_another_guardian_home(env, tmp_path):
+    """Case ids are deterministic: a re-analysis with another data dir reuses the branch."""
+    first = _apply(env, decision(env["case"]))
+    other_home = tmp_path / "other-home"
+    stale = other_home / "worktrees" / env["case"].id
+    stale.parent.mkdir(parents=True)
+    first.worktree_path.rename(stale)
+    git(env["repo"], "worktree", "repair", str(stale))
+    second = apply_case(
+        env["db"],
+        env["case"],
+        None,
+        decision(env["case"]),
+        repo_root=env["repo"],
+        guardian_home=env["home"],
+        runner=env["runner"],
+        apply_fn=bump_lodash,
+    )
+    assert second.worktree_path == first.worktree_path
+    assert not stale.exists()
+    assert str(stale) not in git(env["repo"], "worktree", "list", "--porcelain")
+
+
+def test_reapply_never_removes_a_human_worktree_on_guardian_branch(env, tmp_path):
+    first = _apply(env, decision(env["case"]))
+    git(env["repo"], "worktree", "remove", "--force", str(first.worktree_path))
+    human = tmp_path / "my-checkout"
+    git(env["repo"], "worktree", "add", str(human), first.branch)
+    with pytest.raises(RemediationApplyError, match="did not create"):
+        _apply(env, decision(env["case"]))
+    assert human.exists()
+
+
+def test_commit_message_names_the_parent_for_parent_upgrades(env):
+    candidate = env["candidates"][0].model_copy(
+        update={
+            "component": "pkg:npm/crypto-js@3.3.0",
+            "strategy": "parent",
+            "target_package": "pdfkit",
+            "from_version": "0.11.0",
+            "to_version": "0.12.2",
+        }
+    )
+    subject = commit_message(env["case"], candidate, decision(env["case"]), None).splitlines()[0]
+    assert (
+        subject == "guardian: upgrade parent pdfkit 0.11.0 -> 0.12.2 (for pkg:npm/crypto-js@3.3.0)"
+    )

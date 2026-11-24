@@ -672,6 +672,62 @@
         listBlock("Components removed", diff.removed || [], ""),
       ),
       (v.reasons || []).length ? h("ul", { "aria-label": "Reasons" }, v.reasons.map((r) => h("li", { text: r }))) : null,
+      pullRequestLine(detail.pull_request),
+    );
+  }
+
+  const COMPAT_WORDS = {
+    compatible: "Compatible",
+    conflict: "Merge conflict",
+    same_package: "Same package, different version",
+    unknown: "Not compared",
+  };
+
+  function renderCompatibility(detail) {
+    const checks = detail.compatibility || [];
+    if (!checks.length) return null;
+    const bad = checks.filter((c) => c.status !== "compatible").length;
+    const tag = h("span", { class: bad ? "tag conflict" : "tag verified", text: bad ? `${bad} to review` : "All compatible" });
+    return section(
+      "Works with the other fixes?",
+      tag,
+      h("p", { class: "quiet small", text: "Each fix is built, tested and rescanned on its own branch. Guardian merges this branch with every other fix branch in memory (git merge-tree, nothing checked out) to show which fixes can ship together." }),
+      h(
+        "ul",
+        { class: "compat" },
+        checks.map((c) =>
+          h(
+            "li",
+            { dataset: { status: c.status } },
+            h("strong", { text: `${COMPAT_WORDS[c.status] || c.status}: ` }),
+            code(c.case_id),
+            ` ${c.title}`,
+            c.detail ? h("span", { class: "quiet", text: ` (${c.detail})` }) : null,
+            (c.files || []).length ? h("span", { class: "code", text: ` ${c.files.join(", ")}` }) : null,
+          ),
+        ),
+      ),
+    );
+  }
+
+  function githubLink(url, label) {
+    // Pull request links are shown as links only when they point at https://github.com/.
+    if (typeof url !== "string" || !url.startsWith("https://github.com/")) return h("span", { class: "code", text: label || String(url || "") });
+    return safeLink(url, label);
+  }
+
+  function pullRequestLine(pr) {
+    if (!pr) return null;
+    if (!pr.url) {
+      return h("p", { class: "small quiet" }, h("strong", { text: "Pull request not opened: " }), pr.error || "unknown error");
+    }
+    const kind = pr.draft ? "Draft pull request" : "Pull request";
+    return h(
+      "p",
+      { class: "pull-request" },
+      h("strong", { text: `${kind} #${pr.number}: ` }),
+      githubLink(pr.url, pr.repository ? `${pr.repository} #${pr.number}` : pr.url),
+      " (Guardian never merges; review it on GitHub)",
     );
   }
 
@@ -920,12 +976,13 @@
     "agent-vulnerability": [790, 198],
     "agent-code": [790, 266],
     "agent-correlator": [1000, 165],
-    cases: [110, 460],
-    decision: [320, 460],
-    apply: [520, 460],
-    sandbox: [710, 460],
-    rescan: [890, 460],
-    verdict: [1070, 460],
+    cases: [90, 460],
+    decision: [265, 460],
+    apply: [440, 460],
+    sandbox: [610, 460],
+    rescan: [775, 460],
+    verdict: [935, 460],
+    pr: [1100, 460],
   };
   const TRUNK_Y = 370;
 
@@ -1268,6 +1325,12 @@
       panel.append(h("p", { text: "Decision recorded. Guardian is moving the case on; this page follows along." }));
       return panel;
     }
+    if (c.status === "AWAITING_DECISION" && detail.can_revalidate) {
+      panel.append(
+        h("p", { class: "small", text: "The last attempt failed. Run the approved fix again after fixing the cause, or choose a different fix below." }),
+        h("button", { class: "act", type: "button", onclick: (ev) => submit(ev, { action: "revalidate" }) }, "Revalidate the approved fix"),
+      );
+    }
     if (c.status === "VALIDATION_FAILED" || c.status === "VERIFIED") {
       panel.append(
         h("p", { text: c.status === "VERIFIED" ? "The fix is verified. You can run validation again if something changed." : "Validation failed. Run it again after fixing the cause, or wait for the case to return to review." }),
@@ -1412,6 +1475,7 @@
       columns,
       renderValidations(detail),
       renderVerification(detail),
+      renderCompatibility(detail),
       renderAudit(detail),
     );
   }

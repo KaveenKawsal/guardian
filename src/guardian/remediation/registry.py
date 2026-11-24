@@ -21,6 +21,7 @@ from urllib.parse import quote
 import httpx
 
 from guardian.remediation import npm_semver
+from guardian.remediation.advisories import OsvVersionAdvisories
 
 REGISTRY_HOST = "registry.npmjs.org"
 REGISTRY_URL = f"https://{REGISTRY_HOST}/"
@@ -125,9 +126,14 @@ class NpmRegistry:
         ttl_hours: float = 24,
         *,
         clock: Callable[[], datetime] | None = None,
+        advisories: Callable[[str, str], list[str] | None] | None = None,
     ) -> None:
         self.cache_dir = cache_dir
         self.client = client
+        self.advisories = advisories or OsvVersionAdvisories(
+            cache_dir.parent / "osv-versions", client
+        )
+        """``(name, version) -> advisory ids`` for a target version (None = unknown)."""
         self.ttl = timedelta(hours=ttl_hours)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.errors: dict[str, str] = {}

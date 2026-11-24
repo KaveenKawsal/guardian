@@ -7,7 +7,7 @@ events. The browser only draws what this returns.
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from guardian.core.remediation_models import (
     AuditEvent,
@@ -20,6 +20,7 @@ from guardian.core.remediation_models import (
     VerificationResult,
     VerificationStatus,
 )
+from guardian.integrations.github.records import pull_request_of
 
 StationState = Literal["done", "current", "failed", "skipped", "pending"]
 
@@ -64,6 +65,8 @@ class Journey:
     """A validation attempt failed and the case returns (or returned) to human review."""
     failed_attempts: int = 0
     notes: list[str] = field(default_factory=list)
+    pull_request: dict[str, Any] | None = None
+    """``{"url", "number", "draft"}`` once Guardian opened the pull request (GitHub URLs only)."""
 
     def to_json(self) -> dict[str, object]:
         return asdict(self)
@@ -105,6 +108,31 @@ def _failed_at(
     if verifications:
         return "rescan"
     return "build"
+
+
+def _pr_note(pr: dict[str, Any]) -> str:
+    if pr.get("url"):
+        kind = "draft PR" if pr.get("draft") else "PR"
+        return f"{kind} #{pr.get('number')} opened"
+    return "pull request not opened"
+
+
+def _verified_note(
+    journey: Journey,
+    verified: Station,
+    verifications: Sequence[VerificationResult],
+    events: Sequence[AuditEvent],
+    *,
+    pull_request: bool,
+) -> None:
+    if verifications:
+        latest = verifications[-1]
+        if latest.status is not VerificationStatus.VERIFIED:  # "Verified: verified" says nothing
+            verified.note = latest.status.value.replace("_", " ").lower()
+    pr = pull_request_of(events) if pull_request else None
+    if pr is not None:
+        journey.pull_request = pr
+        verified.note = _pr_note(pr)
 
 
 def _failed_runs(
@@ -192,10 +220,13 @@ def build_journey(  # noqa: C901, PLR0912, PLR0913 - one branch per case status 
             "justification": last_decision.justification if last_decision is not None else None,
         }
 
-    if verifications:
-        latest = verifications[-1]
-        if latest.status is not VerificationStatus.VERIFIED:  # "Verified: verified" says nothing
-            by_key["verified"].note = latest.status.value.replace("_", " ").lower()
+    _verified_note(
+        journey,
+        by_key["verified"],
+        verifications,
+        events,
+        pull_request=status in {CaseStatus.VERIFIED, CaseStatus.CLOSED} and not declined,
+    )
     if decision_pending and status is CaseStatus.AWAITING_DECISION:
         journey.notes.append("Decision recorded; Guardian is moving the case on.")
     return journey

@@ -128,6 +128,9 @@ class _Context:
     package: PackageVersions | None = None
     package_loaded: bool = False
     fetched: dict[str, PackageVersions | None] = field(default_factory=dict)
+    advisory_notes: dict[str, list[str]] = field(default_factory=dict)
+    """Per target version: what the target-version advisory check found (for the notes)."""
+    advisory_lookups: int = 0
 
     def fetch(self, name: str) -> PackageVersions | None:
         if name not in self.fetched:
@@ -158,6 +161,51 @@ class _Context:
             items.append(f"advisory:{d.vulnerability_id}")
             items += [f"advisory:{a}" for a in d.aliases]
         return [*dict.fromkeys(items), *extra]
+
+
+MAX_ADVISORY_LOOKUPS = 8
+"""Target-version advisory lookups per case (each is one OSV query, cached for 24 h)."""
+
+
+def _target_advisories(ctx: _Context, name: str, version: str) -> list[str] | None:
+    lookup = getattr(ctx.registry, "advisories", None)
+    if not callable(lookup) or ctx.advisory_lookups >= MAX_ADVISORY_LOOKUPS:
+        return None
+    ctx.advisory_lookups += 1
+    try:
+        found = lookup(name, version)
+    except Exception:  # noqa: BLE001 - an advisory lookup never blocks remediation
+        return None
+    return found if isinstance(found, list) else None
+
+
+def _prefer_clean(
+    ctx: _Context, versions: Sequence[str], fixes: Callable[[str], bool], name: str | None = None
+) -> str | None:
+    """The lowest version that ``fixes`` the case and has no other known advisory.
+
+    Falls back to the lowest fixing version when every checked one has advisories or the
+    lookup is unavailable (offline), so the network never decides whether a fix exists.
+    """
+    package = name or ctx.name
+    fixing = [v for v in versions if fixes(v)]
+    skipped: list[str] = []
+    for version in fixing[:MAX_ADVISORY_LOOKUPS]:
+        found = _target_advisories(ctx, package, version)
+        if found is None:
+            break  # unknown: do not guess, keep the plain choice
+        if not found:
+            notes = [*skipped, f"OSV: no known advisory for {package} {version}"]
+            ctx.advisory_notes.setdefault(version, notes)
+            return version
+        skipped.append(f"skipped {package} {version}: itself affected by {', '.join(found[:3])}")
+    if not fixing:
+        return None
+    if skipped:
+        ctx.advisory_notes.setdefault(
+            fixing[0], [*skipped, f"no checked {package} version is free of advisories"]
+        )
+    return fixing[0]
 
 
 def _later_versions(
@@ -251,7 +299,7 @@ def _upgrade(ctx: _Context, version: str, *, verified: bool) -> RemediationCandi
     fixed = [f.id for f in ctx.findings if f not in remaining]
     notes = _jump_notes(ctx.current, version, ctx.name)
     reg_notes, reg_evidence = _registry_notes(ctx.package if verified else None, version)
-    notes += reg_notes
+    notes += reg_notes + ctx.advisory_notes.get(version, [])
     if remaining:
         ids = ", ".join(_vuln_id(f) for f in remaining)
         notes.append(f"partial fix: {ctx.name} {version} is still affected by {ids}")
@@ -300,14 +348,16 @@ def _direct_upgrades(ctx: _Context) -> list[RemediationCandidate]:
 
     same_major = None
     if cur is not None:
-        same_major = first(
+        same_major = _prefer_clean(
+            ctx,
+            versions,
             lambda v: (
                 (p := npm_semver.parse(v)) is not None
                 and p.major == cur.major
                 and not ctx.still_affected(v)
-            )
+            ),
         )
-    overall = first(lambda v: not ctx.still_affected(v))
+    overall = _prefer_clean(ctx, versions, lambda v: not ctx.still_affected(v))
     picks = [v for v in (same_major, overall) if v is not None]
     # Partial fixes: the lowest version that resolves each finding on its own, so a reviewer
     # sees e.g. "4.2.2 fixes the critical advisory" next to "9.0.0 fixes all of them".
@@ -424,7 +474,7 @@ def _override(ctx: _Context, parents: list[Component]) -> RemediationCandidate |
     versions = (
         _later_versions(ctx.package, ctx.current, verified=True) if verified else _osv_versions(ctx)
     )
-    version = next((v for v in versions if not ctx.still_affected(v)), None)
+    version = _prefer_clean(ctx, versions, lambda v: not ctx.still_affected(v))
     if version is None or ctx.manifest is None:
         return None
     notes = [
@@ -445,7 +495,7 @@ def _override(ctx: _Context, parents: list[Component]) -> RemediationCandidate |
                 f"override goes outside that range"
             )
     reg_notes, reg_evidence = _registry_notes(ctx.package if verified else None, version)
-    notes += reg_notes
+    notes += reg_notes + ctx.advisory_notes.get(version, [])
     fixed = [f.id for f in ctx.findings]
     return RemediationCandidate(
         id=candidate_id_for(ctx.case.fingerprint, RemediationActionType.PIN, ctx.purl, version),

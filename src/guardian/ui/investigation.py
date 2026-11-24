@@ -279,10 +279,47 @@ def _agent_nodes(
     return nodes
 
 
+def _pull_request_node(
+    db: Database, cases: list[Any], *, pr_enabled: bool | None
+) -> dict[str, Any]:
+    opened = failed = 0
+    for case in cases:
+        events = {e.event for e in db.audit.list(case.id)}
+        if "pr:opened" in events:
+            opened += 1
+        elif "pr:failed" in events:
+            failed += 1
+    if opened:
+        status = "success"
+    elif failed:
+        status = "failed"
+    else:
+        status = "skipped" if pr_enabled is False else "not_run"
+    summary = (
+        f"{opened} opened, {failed} failed"
+        if opened or failed
+        else ("Off (GUARDIAN_PR_ENABLED)" if pr_enabled is False else "No pull request yet")
+    )
+    return _node(
+        "pr",
+        "Pull request",
+        "remediation",
+        status,
+        summary,
+        [
+            ("Opened", str(opened)),
+            ("Failed", str(failed)),
+            ("Rule", "Only after a human ACCEPT/MODIFY and a VERIFIED verdict; never merged"),
+        ],
+    )
+
+
 def architecture(
     db: Database,
     risk: Any,  # noqa: ANN401 - payloads.RiskCache (circular import avoided)
     job: dict[str, Any],
+    *,
+    pr_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Guardian's real pipeline for the latest scan, each node with live status from data."""
     scan = _latest_scan(db)
@@ -442,6 +479,7 @@ def architecture(
             or "No verdict yet",
             [(s.lower().replace("_", " "), str(n)) for s, n in sorted(verdicts.items())],
         ),
+        _pull_request_node(db, cases, pr_enabled=pr_enabled),
     ]
     edges = [
         ["profile", "sbom"],
@@ -466,6 +504,7 @@ def architecture(
         ["apply", "sandbox"],
         ["sandbox", "rescan"],
         ["rescan", "verdict"],
+        ["verdict", "pr"],
     ]
     return {
         "scan": {

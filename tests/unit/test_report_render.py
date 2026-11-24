@@ -221,7 +221,8 @@ def test_json_round_trips_and_is_stable():
     report = make_report()
     text = render_json(report)
     data = json.loads(text)
-    assert data["meta"]["schema_version"] == "1"
+    assert data["meta"]["schema_version"] == "2"
+    assert "remediation" not in data
     assert list(data)[:2] == ["meta", "summary"]
     assert ReportData.model_validate(data) == report
     assert render_json(report) == text

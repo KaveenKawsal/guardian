@@ -11,6 +11,8 @@ from rich.table import Table
 from guardian.core.config import GuardianSettings, env_files
 from guardian.core.exceptions import GuardianError
 from guardian.execution.runner import ToolRunner
+from guardian.integrations.github.client import GitHubClient
+from guardian.integrations.github.remote import GitHubRepo, PrError, resolve_github_repo
 from guardian.integrations.jira.client import jira_client_from_settings
 from guardian.llm.providers import mask_secret
 from guardian.orchestration.checkpoint import checkpoint_path, open_checkpointer
@@ -37,7 +39,8 @@ FAIL = "[red]missing[/red]"
 
 def doctor(
     online: Annotated[
-        bool, typer.Option("--online", help="Also authenticate against Jira (network call).")
+        bool,
+        typer.Option("--online", help="Also authenticate against Jira and GitHub (network calls)."),
     ] = False,
 ) -> None:
     """Check external tools, Docker, Jira, LLM keys and Guardian's own storage."""
@@ -83,6 +86,7 @@ def remediation_checks(*, online: bool = False) -> None:
         _docker(settings),
         _jira(settings, online=online),
         _approvers(settings),
+        _github(settings, online=online),
         *_llm_keys(settings),
         _checkpoints(settings),
     ):
@@ -128,6 +132,45 @@ def _jira(settings: GuardianSettings, *, online: bool) -> tuple[str, str, str]:
         return ("Jira", "[red]failed[/red]", escape(str(exc)))
     name = me.get("displayName") or me.get("emailAddress") or "?"
     return ("Jira", OK, escape(f"authenticated as {name}: {target}"))
+
+
+def _github(
+    settings: GuardianSettings,
+    *,
+    online: bool,
+    repo_root: Path | None = None,
+    client: GitHubClient | None = None,
+) -> tuple[str, str, str]:
+    """Pull requests: off/on, token present (masked); ``--online`` checks the token and,
+    when run inside a repository with a GitHub remote, access to that repository."""
+    token = settings.github_token
+    state = (
+        f"on ({'draft' if settings.pr_draft else 'ready for review'}, "
+        f"remote {settings.pr_remote}, base {settings.pr_base or 'default branch'})"
+        if settings.pr_enabled
+        else "off (GUARDIAN_PR_ENABLED=false)"
+    )
+    detail = f"pull requests {state}; GH_TOKEN {mask_secret(token)}"
+    if token is None:
+        return ("GitHub", WARN if settings.pr_enabled else OK, escape(detail))
+    if not online:
+        return ("GitHub", OK, escape(detail + " (--online to check access)"))
+    repo: GitHubRepo | None = None
+    try:
+        repo = resolve_github_repo(ToolRunner(), repo_root or Path.cwd(), settings.pr_remote)
+    except PrError:
+        repo = None
+    try:
+        with client or GitHubClient(token) as github:
+            login = github.user().get("login") or "?"
+            detail += f"; authenticated as {login}"
+            if repo is not None:
+                permissions = github.repository(repo).get("permissions") or {}
+                push = "push allowed" if permissions.get("push") else "NO push permission"
+                detail += f"; {repo.full_name}: {push}"
+    except PrError as exc:
+        return ("GitHub", "[red]failed[/red]", escape(f"{detail}; {exc}"))
+    return ("GitHub", OK, escape(detail))
 
 
 def _approvers(settings: GuardianSettings) -> tuple[str, str, str]:

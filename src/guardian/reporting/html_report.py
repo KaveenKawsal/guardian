@@ -15,7 +15,7 @@ from functools import cache
 from importlib.resources import files
 from typing import Any
 
-from guardian.reporting.models import ReportData
+from guardian.reporting.models import ReportData, report_payload
 
 DATA_PLACEHOLDER = "/*__REPORT_DATA__*/"
 TITLE_PLACEHOLDER = "__TITLE__"
@@ -54,7 +54,7 @@ def render_html(report: ReportData) -> str:
     template, script_hash = _template()
     values = {
         TITLE_PLACEHOLDER: html.escape(f"{report.meta.repository} · Guardian security report"),
-        DATA_PLACEHOLDER: script_safe_json(report.model_dump(mode="json")),
+        DATA_PLACEHOLDER: script_safe_json(report_payload(report)),
         HASH_PLACEHOLDER: script_hash,
     }
     # One pass, so a substituted value can never be mistaken for another placeholder.

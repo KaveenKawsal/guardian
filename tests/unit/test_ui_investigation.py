@@ -6,7 +6,7 @@ import threading
 from datetime import UTC, datetime
 
 import pytest
-from investigation_fakes import routes
+from investigation import routes
 from investigation_world import SCAN_ID, seed_ai_scan
 
 from guardian.core.config import GuardianSettings
@@ -123,6 +123,7 @@ def test_architecture_before_any_run(env):
         "sandbox",
         "rescan",
         "verdict",
+        "pr",
     }
     assert set(nodes) == expected
     assert nodes["sbom"]["status"] == "partial"  # npm-lockfile failed, cdxgen ran

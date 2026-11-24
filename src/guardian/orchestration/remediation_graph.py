@@ -4,7 +4,7 @@
 plan -> publish_jira -> await_decision
 await_decision --ACCEPT/MODIFY/REVALIDATE--> apply -> validate -> rescan_verify
 await_decision --DECLINE--> record_acceptance -> report_back -> END
-rescan_verify  --VERIFIED--> report_back -> END
+rescan_verify  --VERIFIED--> open_pr -> report_back -> END
 rescan_verify / apply / validate --failed--> publish_failure -> await_decision
 (the re-review loop is a conditional edge in the graph, not a loop inside a node)
 ```
@@ -23,6 +23,12 @@ Rules this module keeps (ADR 11):
   guarded: a replayed node checks the current status and skips the edges it already took.
 * Side-effect nodes call idempotent services and append one ``graph:<node>`` audit event per
   attempt (also guarded, so replays do not duplicate it).
+* ``open_pr`` (only reached on VERIFIED) pushes the fix branch and opens a pull request when
+  ``GUARDIAN_PR_ENABLED`` is on (the service returns None otherwise). It is guarded by the
+  ``pr:opened`` audit event, so a replay never pushes or creates twice. A ``GuardianError`` from
+  it is not a remediation failure: it is audited as ``pr:failed``, reported to Jira, and the case
+  still closes as VERIFIED. Adding the node did not rename any other node, so threads paused at
+  ``await_decision`` under the previous graph shape resume unchanged.
 """
 
 import json
@@ -42,6 +48,7 @@ from guardian.core.remediation_models import (
     HumanDecision,
     VerificationStatus,
 )
+from guardian.integrations.github.records import PR_FAILED_EVENT, PR_OPENED_EVENT
 from guardian.orchestration.services import RemediationServices
 from guardian.orchestration.state import RemediationState
 from guardian.storage.database import Database
@@ -328,6 +335,43 @@ class _Nodes:
             "last_event": "verified" if verified else "verification_failed",
         }
 
+    def _pr_opened(self, case_id: str) -> dict[str, Any] | None:
+        for recorded in self.db.audit.list(case_id):
+            if recorded.event == PR_OPENED_EVENT:
+                return json.loads(recorded.payload_json)
+        return None
+
+    def open_pr(self, state: RemediationState) -> dict[str, Any]:
+        """Open the pull request of a VERIFIED fix (opt-in). Never fails the case."""
+        case_id = state["case_id"]
+        attempt = state.get("attempt", 1)
+        opened = self._pr_opened(case_id)
+        if opened is None:
+            if (failed := self._audited(case_id, PR_FAILED_EVENT, attempt)) is not None:
+                # Replay after the failure was recorded but before the checkpoint was.
+                self._notify_once(case_id, "pr_failed", attempt, {"error": failed.get("error")})
+                return {"pull_request": None, "last_event": "pr_failed"}
+            try:
+                result = self.services.open_pr(
+                    case_id, state.get("applied") or {}, state.get("verification") or {}
+                )
+            except GuardianError as exc:
+                error = " ".join(str(exc).split())[:500]
+                self.db.audit.append(
+                    case_id, PR_FAILED_EVENT, SYSTEM_ACTOR, {"attempt": attempt, "error": error}
+                )
+                self._notify_once(case_id, "pr_failed", attempt, {"error": error})
+                self._audit_once(case_id, "open_pr", attempt, {"error": error})
+                return {"pull_request": None, "last_event": "pr_failed"}
+            if result is None:
+                return {"pull_request": None, "last_event": "pr_skipped"}
+            opened = {"attempt": attempt, **result}
+            self.db.audit.append(case_id, PR_OPENED_EVENT, SYSTEM_ACTOR, opened)
+        summary = {"url": opened.get("url"), "number": opened.get("number")}
+        self._notify_once(case_id, "pr_opened", attempt, {**opened, "attempt": attempt})
+        self._audit_once(case_id, "open_pr", attempt, summary)
+        return {"pull_request": opened, "last_event": "pr_opened"}
+
     def publish_failure(self, state: RemediationState) -> dict[str, Any]:
         case_id = state["case_id"]
         attempt = state.get("attempt", 1)
@@ -419,7 +463,7 @@ def _after_validate(state: RemediationState) -> str:
 
 
 def _after_verify(state: RemediationState) -> str:
-    return "report_back" if state.get("last_event") == "verified" else "publish_failure"
+    return "open_pr" if state.get("last_event") == "verified" else "publish_failure"
 
 
 def build_remediation_graph(
@@ -441,6 +485,7 @@ def build_remediation_graph(
     graph.add_node("rescan_verify", nodes.rescan_verify)
     graph.add_node("publish_failure", nodes.publish_failure)
     graph.add_node("record_acceptance", nodes.record_acceptance)
+    graph.add_node("open_pr", nodes.open_pr)
     graph.add_node("report_back", nodes.report_back)
     graph.add_edge(START, "plan")
     graph.add_edge("plan", "publish_jira")
@@ -448,7 +493,8 @@ def build_remediation_graph(
     graph.add_conditional_edges(AWAIT_NODE, _after_decision, ["apply", "record_acceptance"])
     graph.add_conditional_edges("apply", _after_apply, ["validate", "publish_failure"])
     graph.add_conditional_edges("validate", _after_validate, ["rescan_verify", "publish_failure"])
-    graph.add_conditional_edges("rescan_verify", _after_verify, ["report_back", "publish_failure"])
+    graph.add_conditional_edges("rescan_verify", _after_verify, ["open_pr", "publish_failure"])
+    graph.add_edge("open_pr", "report_back")
     graph.add_edge("publish_failure", AWAIT_NODE)
     graph.add_edge("record_acceptance", "report_back")
     graph.add_edge("report_back", END)
@@ -496,6 +542,7 @@ def start_case(graph: RemediationGraph, case_id: str) -> InterruptInfo | None:
             "applied": None,
             "validation": None,
             "verification": None,
+            "pull_request": None,
             "jira_key": None,
             "last_event": None,
             "error": None,

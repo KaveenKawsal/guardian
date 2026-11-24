@@ -34,6 +34,13 @@ DEFAULT_ENV_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
+# Credentials that must never reach a child process through inheritance, even if an allowlist
+# is widened by mistake. The one git call that needs a GitHub token (``integrations/github``)
+# passes it explicitly, under its own name, through ``ToolRunner.run(env=...)``.
+NEVER_INHERITED_ENV: frozenset[str] = frozenset(
+    {"GH_TOKEN", "GITHUB_TOKEN", "GUARDIAN_GITHUB_TOKEN", "GUARDIAN_GIT_TOKEN"}
+)
+
 # A malicious repository's .git/config can execute commands during otherwise read-only git
 # operations (core.fsmonitor, diff.external, hooks). These overrides neutralise that and
 # must be passed before the git subcommand.
@@ -85,6 +92,15 @@ class ExecutionPolicy:
     def build_env(self, source: Mapping[str, str] | None = None) -> dict[str, str]:
         source = os.environ if source is None else source
         allowed = {k.upper() for k in self.env_allowlist}
-        env = {k: v for k, v in source.items() if k.upper() in allowed}
+        env = {
+            k: v
+            for k, v in source.items()
+            if k.upper() in allowed and k.upper() not in NEVER_INHERITED_ENV
+        }
         env.update(self.extra_env)
         return env
+
+
+GIT_PUSH_POLICY = ExecutionPolicy(allowed_tools=frozenset({"git"}), timeout_seconds=300.0)
+"""Policy for ``integrations/github/push.py``: git only. The https/credential overrides it needs
+are added as ``-c`` arguments of that single command, never to the shared hardening."""

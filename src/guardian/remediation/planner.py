@@ -7,7 +7,7 @@ deterministic plan with the reason recorded in ``RemediationPlan.notes`` (rule 7
 """
 
 import json
-import re
+import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -29,7 +29,35 @@ from guardian.core.remediation_models import (
     SemverJump,
 )
 from guardian.indexing.code_retriever import redact_secrets
-from guardian.llm.providers import build_chat_model, resolve_provider, safe_error_message
+from guardian.llm.keys import load_key_settings
+from guardian.llm.providers import build_chat_model, resolve_provider
+from guardian.llm.resilient import (
+    DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    MAX_RATE_LIMIT_WAIT_SECONDS,
+    CallOutcome,
+    LLMUnavailableError,
+    ProviderPool,
+    build_pool,
+    invoke_structured,
+    provider_chain,
+    rate_limit_delay,
+)
+
+__all__ = [
+    "DEFAULT_RATE_LIMIT_WAIT_SECONDS",
+    "MAX_RATE_LIMIT_WAIT_SECONDS",
+    "PLANNER_SYSTEM_PROMPT",
+    "PlanChoice",
+    "PlanRejectedError",
+    "build_messages",
+    "make_plan",
+    "plan_deterministic",
+    "plan_with_llm",
+    "rank_candidates",
+    "rate_limit_delay",
+]
+
+logger = logging.getLogger(__name__)
 
 NON_CODE = frozenset({RemediationActionType.BLOCK, RemediationActionType.ESCALATE})
 _JUMP_RANK = {SemverJump.PATCH: 0, SemverJump.MINOR: 1, SemverJump.MAJOR: 2, SemverJump.UNKNOWN: 3}
@@ -42,11 +70,8 @@ MAX_ALIASES = 3
 MAX_NOTES = 4
 MAX_SUMMARY_CHARS = 200
 MAX_NOTE_CHARS = 160
-# Rate limits: wait out the provider's "try again in N s" once per case instead of giving up.
-MAX_RATE_LIMIT_WAIT_SECONDS = 60.0
-HTTP_TOO_MANY_REQUESTS = 429
-DEFAULT_RATE_LIMIT_WAIT_SECONDS = 20.0
-_RETRY_AFTER_RE = re.compile(r"(?:try again|retry) in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+# Rate limits: pacing, key rotation, provider fallback and one capped wait per case come from
+# guardian.llm.resilient (shared with the investigators). Tests replace ``_sleep``.
 _sleep: Callable[[float], None] = time.sleep
 
 PLANNER_SYSTEM_PROMPT = """\
@@ -313,6 +338,21 @@ def plan_with_llm(  # noqa: PLR0913 - case data plus provider labels
     model: str | None = None,
 ) -> RemediationPlan:
     """Let the model pick a listed candidate; fall back to the deterministic plan on failure."""
+    pool = ProviderPool.single(provider or "", model or "", chat_model)
+    return _plan_with_pools(case, findings, assessments, candidates, [pool])
+
+
+def _sleep_now(seconds: float) -> None:
+    _sleep(seconds)  # module attribute looked up per call so tests can replace it
+
+
+def _plan_with_pools(
+    case: RemediationCase,
+    findings: Sequence[Finding],
+    assessments: Mapping[str, RiskAssessment] | Sequence[RiskAssessment],
+    candidates: Sequence[RemediationCandidate],
+    pools: Sequence[ProviderPool],
+) -> RemediationPlan:
     by_id = (
         dict(assessments)
         if isinstance(assessments, Mapping)
@@ -320,78 +360,81 @@ def plan_with_llm(  # noqa: PLR0913 - case data plus provider labels
     )
     valid_ids = [c.id for c in candidates]
     messages = build_messages(case, findings, by_id, candidates)
-    try:
-        structured = chat_model.with_structured_output(PlanChoice)
-    except (NotImplementedError, AttributeError, ValueError) as exc:
-        return plan_deterministic(case, candidates, notes=[f"ai_unavailable: {exc}"[:300]])
     error = ""
-    raw: object = None
-    waited = False
-    attempt = 0
-    while attempt < 2:  # noqa: PLR2004 - first answer plus one repair
+    for attempt in range(2):  # first answer plus one repair; rate limits are handled inside
         try:
-            raw = structured.invoke(messages)
-            choice = _validate(raw, valid_ids)
+            outcome = invoke_structured(pools, PlanChoice, messages, sleep=_sleep_now)
+        except LLMUnavailableError as exc:
+            error = exc.reason
+            break
+        try:
+            choice = _validate(outcome.value, valid_ids)
         except PlanRejectedError as exc:
             error = str(exc)
             if attempt == 0:
                 messages = [
                     *messages,
-                    AIMessage(json.dumps(_safe_dump(raw), default=str)[:2000]),
+                    AIMessage(json.dumps(_safe_dump(outcome.value), default=str)[:2000]),
                     HumanMessage(
                         f"Your answer was rejected: {error}. Answer again, choosing only from "
                         f"the listed candidate ids: {', '.join(valid_ids)}."
                     ),
                 ]
-            attempt += 1
             continue
-        except Exception as exc:  # noqa: BLE001 - provider SDKs raise many unrelated types
-            error = safe_error_message(exc)
-            delay = rate_limit_delay(exc)
-            if delay is not None and not waited:
-                waited = True
-                _sleep(delay)
-                continue  # same attempt: a rate limit is not the model's fault
-            break
         alternatives = [
             *choice.ranked_alternative_ids,
             *(i for i in valid_ids if i not in choice.ranked_alternative_ids),
         ]
+        notes = [f"repaired after: {error}"] if attempt else []
+        notes.extend(_route_notes(pools, outcome))
         return RemediationPlan(
             case_id=case.id,
             chosen_candidate_id=choice.chosen_candidate_id,
             alternatives=[i for i in alternatives if i != choice.chosen_candidate_id],
             rationale=choice.rationale,
             confidence=choice.confidence,
-            llm_provider=provider,
-            llm_model=model,
+            llm_provider=outcome.provider or None,
+            llm_model=outcome.model or None,
             source="inferred",
             decided_by="llm",
-            notes=[f"repaired after: {error}"] if attempt else [],
+            notes=notes,
         )
     return plan_deterministic(case, candidates, notes=[f"ai_unavailable: {error}"[:500]])
 
 
-def rate_limit_delay(exc: BaseException) -> float | None:
-    """Seconds to wait before retrying a rate-limited call, or None if it is not a rate limit."""
-    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    text = str(exc)
-    lowered = text.lower()
-    if (
-        status != HTTP_TOO_MANY_REQUESTS
-        and "rate limit" not in lowered
-        and "ratelimit" not in type(exc).__name__.lower()
-    ):
-        return None
-    match = _RETRY_AFTER_RE.search(text)
-    delay = float(match.group(1)) + 1.0 if match else DEFAULT_RATE_LIMIT_WAIT_SECONDS
-    return min(delay, MAX_RATE_LIMIT_WAIT_SECONDS)
+def _route_notes(pools: Sequence[ProviderPool], outcome: CallOutcome) -> list[str]:
+    """Say so when a backup key or the fallback provider answered (key index only)."""
+    logger.info(
+        "planner answered by %s %s (key #%d)", outcome.provider, outcome.model, outcome.key_index
+    )
+    if outcome.key_index == 0 and outcome.provider == pools[0].provider:
+        return []
+    first = outcome.failed_attempts[0] if outcome.failed_attempts else None
+    after = f" after {first.provider or 'the first route'} {first.status}" if first else ""
+    return [f"answered by {outcome.provider} key #{outcome.key_index}{after}"]
 
 
 def _safe_dump(raw: object) -> object:
     if isinstance(raw, BaseModel):
         return raw.model_dump(mode="json")
     return raw
+
+
+def _planner_pools(settings: GuardianSettings) -> tuple[list[ProviderPool], str | None]:
+    """The active provider then the other keyed one, each with its key pool; or a reason."""
+    chain = provider_chain(settings)
+    if not chain:
+        return [], "no LLM provider configured"
+    keys = load_key_settings()
+    pools: list[ProviderPool] = []
+    first_error: str | None = None
+    for config in chain:
+        result = build_pool(config, settings, build=build_chat_model, keys=keys)
+        if result.errors and first_error is None:
+            first_error = result.errors[0][1]
+        if result.pool is not None:
+            pools.append(result.pool)
+    return pools, None if pools else first_error or "no LLM provider configured"
 
 
 def make_plan(  # noqa: PLR0913 - mirrors plan_with_llm plus the switches
@@ -404,25 +447,21 @@ def make_plan(  # noqa: PLR0913 - mirrors plan_with_llm plus the switches
     no_ai: bool,
     chat_model: BaseChatModel | None = None,
 ) -> RemediationPlan:
-    """``--no-ai`` → deterministic; otherwise the configured provider, falling back on failure."""
+    """``--no-ai`` → deterministic; otherwise the configured provider (with its backup keys and
+    the other provider as fallback), falling back to the deterministic plan on failure."""
     if no_ai:
         return plan_deterministic(case, candidates)
-    provider = model = None
-    if chat_model is None:
-        try:
-            config = resolve_provider(settings)
-        except ConfigurationError as exc:
-            return plan_deterministic(case, candidates, notes=[f"ai_unavailable: {exc}"])
-        if config is None:
-            return plan_deterministic(
-                case, candidates, notes=["ai_unavailable: no LLM provider configured"]
-            )
-        provider, model = config.provider, config.model
-        try:
-            chat_model = build_chat_model(config, settings)
-        except Exception as exc:  # noqa: BLE001 - SDK construction errors vary
-            reason = safe_error_message(exc, config.api_key)
-            return plan_deterministic(case, candidates, notes=[f"ai_unavailable: {reason}"])
-    return plan_with_llm(
-        case, findings, assessments, candidates, chat_model, provider=provider, model=model
-    )
+    if chat_model is not None:
+        return plan_with_llm(case, findings, assessments, candidates, chat_model)
+    try:
+        active = resolve_provider(settings)  # a selected provider without a key is an error
+    except ConfigurationError as exc:
+        return plan_deterministic(case, candidates, notes=[f"ai_unavailable: {exc}"])
+    if active is None:
+        return plan_deterministic(
+            case, candidates, notes=["ai_unavailable: no LLM provider configured"]
+        )
+    pools, reason = _planner_pools(settings)
+    if not pools:
+        return plan_deterministic(case, candidates, notes=[f"ai_unavailable: {reason}"])
+    return _plan_with_pools(case, findings, assessments, candidates, pools)

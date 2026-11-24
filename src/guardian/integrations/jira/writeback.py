@@ -15,12 +15,15 @@ from guardian.core.remediation_models import (
     ValidationRun,
     VerificationResult,
 )
+from guardian.integrations.github.records import pr_url_is_safe
 from guardian.integrations.jira import adf
 from guardian.integrations.jira.client import JiraClient, JiraError
 from guardian.storage.database import Database
 from guardian.storage.remediation import SYSTEM_ACTOR
 
-Stage = Literal["acknowledged", "applying", "validation", "verification", "failure"]
+Stage = Literal[
+    "acknowledged", "applying", "validation", "verification", "failure", "pr_opened", "pr_failed"
+]
 
 
 def stage_event(stage: Stage, key: str) -> str:
@@ -182,5 +185,36 @@ def failure_body(summary: str, reasons: Sequence[str] = ()) -> adf.Node:
         adf.paragraph(
             "The case is back in review. Reply with a /guardian command "
             "(e.g. /guardian modify version=<x.y.z> or /guardian decline ...)."
+        ),
+    )
+
+
+def _link(url: str) -> adf.Node:
+    """A link node, only for https://github.com/... (anything else stays plain code)."""
+    if not pr_url_is_safe(url):
+        return adf.code(url)
+    node = adf.text(url)
+    node["marks"] = [{"type": "link", "attrs": {"href": url}}]
+    return node
+
+
+def pr_opened_body(url: str, number: object, *, draft: bool, reused: bool = False) -> adf.Node:
+    kind = "Draft pull request" if draft else "Pull request"
+    verb = "found (already open)" if reused else "opened"
+    return adf.doc(
+        adf.paragraph(adf.strong(f"{kind} #{number} {verb}: "), _link(url)),
+        adf.paragraph(
+            "Guardian pushed only its guardian/fix-* branch after the human-approved fix was "
+            "VERIFIED. Guardian never merges; review and merge it yourself."
+        ),
+    )
+
+
+def pr_failed_body(error: str) -> adf.Node:
+    return adf.doc(
+        adf.paragraph(adf.strong("Pull request not opened: "), error),
+        adf.paragraph(
+            "The fix is still VERIFIED and committed on Guardian's local guardian/fix-* branch; "
+            "push it and open the pull request by hand, or fix the cause and re-run."
         ),
     )

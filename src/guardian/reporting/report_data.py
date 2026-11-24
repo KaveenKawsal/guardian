@@ -41,12 +41,14 @@ from guardian.knowledge.risk import (
 from guardian.reporting.models import (
     PackageRisk,
     PriorityCount,
+    RemediationSection,
     ReportData,
     ReportFinding,
     ReportMeta,
     ReportSummary,
     SeverityCount,
 )
+from guardian.reporting.remediation_report import build_remediation_section
 from guardian.storage.database import Database
 
 MAX_PATHS = 3
@@ -124,6 +126,9 @@ def build_report(
             f"(limit {max_findings}); all are counted in the summary.",
         )
     summary = _summary(ranked, packages, graph, sbom, index)
+    remediation_section = build_remediation_section(
+        db, scan_id, findings, {r.finding_id: r for r in risks}, settings
+    )
     return ReportData(
         meta=ReportMeta(
             guardian_version=guardian.__version__,
@@ -131,7 +136,7 @@ def build_report(
             repository=profile.name,
             source=_source(profile, settings),
             scan=record,
-            ai_used=False,
+            ai_used=_ai_used(remediation_section),
         ),
         summary=summary,
         findings=report_findings,
@@ -139,6 +144,17 @@ def build_report(
         entry_points=list(index.entry_points) if index else [],
         tool_runs=list(record.tool_runs),
         limitations=limitations,
+        remediation=remediation_section,
+    )
+
+
+def _ai_used(section: RemediationSection | None) -> bool:
+    """True when the report carries AI inference (investigations or an LLM-chosen plan)."""
+    if section is None:
+        return False
+    return any(
+        c.investigations or (c.plan is not None and c.plan.decided_by == "llm")
+        for c in section.cases
     )
 
 

@@ -7,6 +7,7 @@ import typer
 
 from guardian import __version__
 from guardian.cli.ai import ai_app
+from guardian.cli.analyze import analyze
 from guardian.cli.audit import audit_app
 from guardian.cli.code import code
 from guardian.cli.decide import decide, validate
@@ -75,6 +76,7 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+app.command()(analyze)
 app.command()(scan)
 app.command()(findings)
 app.command()(explain)

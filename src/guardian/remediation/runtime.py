@@ -9,10 +9,11 @@ Jira sync, web UI       -> submit_decision()  resume -> apply -> validate -> res
 
 ``GuardianServices`` implements ``RemediationServices`` with the real code: the planner, Jira
 publish/write-back, ``apply_case`` in a ``guardian/fix-*`` worktree, ``validate_case`` in the
-Docker sandbox and ``verify_case`` with a full rescan. Each method is idempotent (a replayed node
-calls it again) and turns expected failures into ``GuardianError`` subclasses, which the graph
-routes back to human review. Jira is best effort here: a Jira outage is audited and never stops
-the remediation.
+Docker sandbox, ``verify_case`` with a full rescan and, when ``GUARDIAN_PR_ENABLED`` is on, a
+GitHub pull request for a VERIFIED fix (``integrations/github``). Each method is idempotent
+(a replayed node calls it again) and turns expected failures into ``GuardianError``
+subclasses, which the graph routes back to human review. Jira is best effort here: a Jira
+outage is audited and never stops the remediation.
 
 Threads: graph nodes run on the calling thread and ``Database`` connections are bound to the
 thread that opened them, so ``submit_decision`` opens its own database and checkpointer inside
@@ -30,6 +31,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from guardian.core.config import GuardianSettings
 from guardian.core.exceptions import GuardianError
 from guardian.core.models import Priority
@@ -41,6 +44,8 @@ from guardian.core.remediation_models import (
     ValidationRun,
 )
 from guardian.execution.runner import ToolRunner
+from guardian.integrations.github.pr import open_pull_request
+from guardian.integrations.github.remote import PrError
 from guardian.integrations.jira import adf
 from guardian.integrations.jira.client import JiraClient, jira_client_from_settings
 from guardian.integrations.jira.publish import (
@@ -54,6 +59,8 @@ from guardian.integrations.jira.writeback import (
     applying_body,
     comment_stage,
     failure_body,
+    pr_failed_body,
+    pr_opened_body,
     validation_body,
     verification_body,
 )
@@ -167,6 +174,8 @@ class GuardianServices:
         scan_fn: ScanFn | None = None,
         registry: RegistryLike | None = None,
         jira_factory: JiraFactory | None = None,
+        push_runner: ToolRunner | None = None,
+        github_http: httpx.Client | None = None,
     ) -> None:
         self.db = db
         self.settings = settings
@@ -179,6 +188,8 @@ class GuardianServices:
         self._registry = registry
         self._jira_factory = jira_factory or jira_client_from_settings
         self._jira: JiraClient | None = None
+        self.push_runner = push_runner
+        self.github_http = github_http
 
     def close(self) -> None:
         if self._jira is not None:
@@ -308,6 +319,26 @@ class GuardianServices:
             self._comment(
                 case_id, "verification", body, key=f"attempt-{attempt}", transition="verified"
             )
+        elif stage == "pr_opened":
+            url = str(payload.get("url") or "")
+            self._comment(
+                case_id,
+                "pr_opened",
+                pr_opened_body(
+                    url,
+                    payload.get("number"),
+                    draft=bool(payload.get("draft")),
+                    reused=bool(payload.get("reused")),
+                ),
+                key=url or f"attempt-{attempt}",
+            )
+        elif stage == "pr_failed":
+            self._comment(
+                case_id,
+                "pr_failed",
+                pr_failed_body(str(payload.get("error") or "unknown error")),
+                key=f"attempt-{attempt}",
+            )
         elif stage == "declined":
             reason = payload.get("decline_reason") or "declined"
             body = adf.doc(
@@ -328,17 +359,18 @@ class GuardianServices:
             msg = f"Repository {repo_root} is not available on this machine"
             raise RemediationApplyError(msg)
         try:
-            applied = apply_case(
-                self.db,
-                case,
-                None,
-                decision,
-                repo_root=repo_root,
-                guardian_home=self.settings.data_dir,
-                runner=self.runner,
-                apply_fn=self.apply_fn,
-                actor=f"{decision.channel}:{decision.actor_id}",
-            )
+            with repository_lock(repo_root):
+                applied = apply_case(
+                    self.db,
+                    case,
+                    None,
+                    decision,
+                    repo_root=repo_root,
+                    guardian_home=self.settings.data_dir,
+                    runner=self.runner,
+                    apply_fn=self.apply_fn,
+                    actor=f"{decision.channel}:{decision.actor_id}",
+                )
         except OSError as exc:
             msg = f"Could not prepare the fix worktree: {exc}"
             raise RemediationApplyError(msg) from exc
@@ -355,15 +387,16 @@ class GuardianServices:
         case = self.db.remediation.get(case_id)
         change = applied_from_json(applied)
         try:
-            run = validate_case(
-                self.db,
-                case,
-                change,
-                sandbox=self.sandbox,
-                unsafe_host=self.settings.unsafe_host_validation,
-                host_sandbox=self.host_sandbox,
-                log_root=self.settings.data_dir / "logs",
-            )
+            with sandbox_slot(self.settings):
+                run = validate_case(
+                    self.db,
+                    case,
+                    change,
+                    sandbox=self.sandbox,
+                    unsafe_host=self.settings.unsafe_host_validation,
+                    host_sandbox=self.host_sandbox,
+                    log_root=self.settings.data_dir / "logs",
+                )
         except (OSError, ValueError) as exc:
             msg = f"Validation could not run: {exc}"
             raise RemediationValidationError(msg) from exc
@@ -372,15 +405,37 @@ class GuardianServices:
 
     def verify(self, case_id: str, applied: dict, validation: dict) -> dict:
         case = self.db.remediation.get(case_id)
-        result = verify_case(
-            self.db,
-            case,
-            applied_from_json(applied),
-            ValidationRun.model_validate(validation),
-            before_scan_id=case.scan_id,
-            scan_fn=self.scan_fn,
-        )
+        with sandbox_slot(self.settings):
+            result = verify_case(
+                self.db,
+                case,
+                applied_from_json(applied),
+                ValidationRun.model_validate(validation),
+                before_scan_id=case.scan_id,
+                scan_fn=self.scan_fn,
+            )
         return result.model_dump(mode="json")
+
+    def open_pr(self, case_id: str, applied: dict, verification: dict) -> dict | None:
+        """Push the verified branch and open its pull request (None when disabled)."""
+        if not self.settings.pr_enabled:
+            return None
+        repo_root = Path(self.db.remediation.get(case_id).repository_root)
+        try:
+            with repository_lock(repo_root):
+                return open_pull_request(
+                    self.db,
+                    self.settings,
+                    case_id,
+                    applied,
+                    verification,
+                    runner=self.runner,
+                    push_runner=self.push_runner,
+                    http_client=self.github_http,
+                )
+        except (OSError, ValueError) as exc:
+            msg = f"Could not open the pull request: {type(exc).__name__}: {exc}"
+            raise PrError(msg) from exc
 
     def record_acceptance(self, case_id: str, decision: HumanDecision) -> None:
         """Audit the decline once per decision, with the accepted-risk expiry for reports."""
@@ -419,6 +474,34 @@ def build_services(
 
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
+_REPO_LOCKS: dict[str, threading.Lock] = {}
+_SLOTS: dict[int, threading.BoundedSemaphore] = {}
+
+
+@contextmanager
+def repository_lock(repo_root: Path) -> Generator[None]:
+    """Serialise git changes to one repository (worktree add/remove, branch delete, push).
+
+    Fixes for different cases run in parallel, but they share the repository's ``.git``:
+    concurrent ``git worktree add`` calls race on its lock files.
+    """
+    key = str(repo_root.resolve())
+    with _LOCKS_GUARD:
+        lock = _REPO_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        yield
+
+
+@contextmanager
+def sandbox_slot(settings: GuardianSettings) -> Generator[None]:
+    """At most ``max_parallel_fixes`` sandbox builds/tests and rescans at a time; each holds
+    its own CPU and memory limits, so this bounds the total load on the machine."""
+    with _LOCKS_GUARD:
+        slots = _SLOTS.setdefault(
+            settings.max_parallel_fixes, threading.BoundedSemaphore(settings.max_parallel_fixes)
+        )
+    with slots:
+        yield
 
 
 @contextmanager

@@ -188,7 +188,12 @@ class ConsoleApp:
             if path == "/api/audit/verify":
                 return _json(200, payloads.audit_status(db))
             if path == "/api/architecture":
-                return _json(200, architecture(db, self.risk, self.jobs.status()))
+                return _json(
+                    200,
+                    architecture(
+                        db, self.risk, self.jobs.status(), pr_enabled=self.settings.pr_enabled
+                    ),
+                )
             if path == "/api/codebase":
                 return _json(200, codebase(db, self.risk))
             if match := _CASE_PATH.fullmatch(path):

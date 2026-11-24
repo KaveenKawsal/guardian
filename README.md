@@ -72,7 +72,20 @@ cp .env.example .env                  # add GUARDIAN_CLI_APPROVERS=<your OS user
 uv run guardian doctor                # checks tools, Docker, Jira, LLM keys, checkpoint store
 ```
 
-End-to-end on a local repository (e.g. a clone of OWASP Juice Shop):
+**One command** (scan → AI investigators → recommended fixes → review website):
+
+```bash
+uv run guardian analyze ~/Documents/juice-shop     # add --no-ai without LLM keys, --rescan to force a scan
+```
+
+In the website, open a case and click **Accept**: Guardian applies the fix in a `guardian/fix-*`
+worktree, builds and tests it in the Docker sandbox, rescans and shows the verdict. Accept several
+cases at once: fixes run in parallel (at most `GUARDIAN_MAX_PARALLEL_FIXES`, default 2, in the
+sandbox at a time; git changes to the shared repository are serialised), and each case shows
+**Works with the other fixes?**, an in-memory merge of its branch with every other fix branch
+that flags conflicts and fixes pinning the same package to different versions.
+
+The same, step by step:
 
 ```bash
 uv run guardian scan ~/code/juice-shop                       # scan + prioritise (lockfile made in sandbox)
@@ -88,6 +101,7 @@ See [`docs/demo/day2-runbook.md`](docs/demo/day2-runbook.md) for the full demo s
 
 | Area | Commands |
 |---|---|
+| One command | `analyze <path\|url>` (scan, investigate, remediate, then open the console) |
 | Scan and explore | `scan <path\|url>`, `findings`, `explain <id>`, `deps`, `code`, `graph`, `profile`, `history`, `report` |
 | AI | `investigate`, `ai status\|models\|test\|use`, `shell` (interactive, read-only assistant) |
 | Remediation | `remediate`, `cases`, `case <id>`, `decide <id> accept\|modify\|decline\|revalidate`, `validate <id>` |
@@ -115,6 +129,7 @@ checkpoints, worktrees and logs live in `~/.guardian/`.
 | `GUARDIAN_APPROVERS` / `GUARDIAN_CLI_APPROVERS` | Jira account IDs / local OS users allowed to decide |
 | `GUARDIAN_JIRA_MIN_PRIORITY`, `GUARDIAN_JIRA_MAX_ISSUES` | Publishing cap (default HIGH, 5) |
 | `GUARDIAN_SANDBOX_CPUS`, `GUARDIAN_SANDBOX_MEMORY`, `GUARDIAN_SANDBOX_TIMEOUT_SECONDS` | Docker limits |
+| `GUARDIAN_MAX_PARALLEL_FIXES` | Accepted fixes built/tested/rescanned at once (default 2) |
 
 Secrets are held as `SecretStr`, never logged, stored, sent to the LLM, or passed to any subprocess.
 

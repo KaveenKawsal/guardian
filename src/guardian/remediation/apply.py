@@ -212,9 +212,44 @@ def _remove_previous(git: _Git, repo_root: Path, worktree: Path, branch: str) ->
     elif worktree.exists():
         shutil.rmtree(worktree)
     git.run(repo_root, "worktree", "prune")
+    _release_branch(git, repo_root, branch)
     exists = git.run(repo_root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
     if exists.ok:
         git.check(repo_root, "branch", "-D", branch)
+
+
+def _checked_out_at(git: _Git, repo_root: Path, branch: str) -> list[Path]:
+    """Worktrees (other than the main one) that have ``branch`` checked out."""
+    listing = git.run(repo_root, "worktree", "list", "--porcelain")
+    if not listing.ok:
+        return []
+    paths: list[Path] = []
+    current: Path | None = None
+    for line in listing.stdout.splitlines():
+        if line.startswith("worktree "):
+            current = Path(line.removeprefix("worktree "))
+        elif line == f"branch refs/heads/{branch}" and current is not None:
+            paths.append(current)
+    return [p for p in paths if p.resolve() != repo_root.resolve()]
+
+
+def _release_branch(git: _Git, repo_root: Path, branch: str) -> None:
+    """Remove Guardian worktrees elsewhere (another data dir, an interrupted run) that still
+    hold ``branch``; case ids are deterministic, so a re-analysis reuses the same branch.
+
+    Only ``.../worktrees/<case_id>`` directories (Guardian's layout) are removed; a worktree a
+    human created on a ``guardian/fix-*`` branch is never deleted.
+    """
+    case_dir = branch.removeprefix(BRANCH_PREFIX)
+    for path in _checked_out_at(git, repo_root, branch):
+        if path.name != case_dir or path.parent.name != "worktrees":
+            msg = (
+                f"Branch {branch} is checked out in {path}, which Guardian did not create; "
+                "remove that worktree (git worktree remove) and decide again"
+            )
+            raise RemediationApplyError(msg)
+        git.check(repo_root, "worktree", "remove", "--force", str(path))
+    git.run(repo_root, "worktree", "prune")
 
 
 def _verify_ref(git: _Git, repo_root: Path, ref: str, *, commit: bool) -> str:
@@ -249,8 +284,15 @@ def commit_message(
     jira_key: str | None,
 ) -> str:
     target = f" -> {candidate.to_version}" if candidate.to_version else ""
+    subject = f"{candidate.action_type.value.lower()} {candidate.component}{target}"
+    if candidate.strategy == "parent" and candidate.target_package:
+        # from/to_version are the parent's; name the parent and the vulnerable package it pulls.
+        subject = (
+            f"upgrade parent {_one_line(candidate.target_package)} "
+            f"{candidate.from_version or '?'}{target} (for {candidate.component})"
+        )
     lines = [
-        f"guardian: {candidate.action_type.value.lower()} {candidate.component}{target}",
+        f"guardian: {subject}",
         "",
         f"Guardian-Case: {case.id}",
         f"Guardian-Findings: {', '.join(case.finding_ids) or '-'}",

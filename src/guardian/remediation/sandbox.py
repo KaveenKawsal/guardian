@@ -30,7 +30,9 @@ PARTIALLY_VERIFIED by ``verify``.
 """
 
 import hashlib
+import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -46,6 +48,8 @@ from guardian.core.remediation_models import StepStatus
 from guardian.execution.policies import DEFAULT_ENV_ALLOWLIST, ExecutionPolicy
 from guardian.execution.results import ToolResult, ToolStatus
 from guardian.execution.runner import ToolRunner
+
+logger = logging.getLogger(__name__)
 
 DOCKER = "docker"
 NPM = "npm"
@@ -414,19 +418,59 @@ class DockerSandbox:
                 str(context / "Dockerfile"),
                 str(context),
             ]
-            result = self.runner.run(
-                DOCKER, args, cwd=context, timeout_seconds=cfg.install_timeout_seconds
-            )
+            attempts = 0
+            while True:
+                attempts += 1
+                result = self.runner.run(
+                    DOCKER, args, cwd=context, timeout_seconds=cfg.install_timeout_seconds
+                )
+                output = _combined_output(result)
+                if result.ok or attempts >= INSTALL_ATTEMPTS or not transient_network(output):
+                    break
+                logger.info("dependency install hit a network error; retrying (%d)", attempts)
         finally:
             shutil.rmtree(context, ignore_errors=True)
         step = _step_from_result(result, [DOCKER, *args])
         if step.status is not StepStatus.PASSED:
-            return None, step
+            reason = install_failure_reason(step.output, attempts)
+            return None, StepResult(
+                step.status,
+                step.exit_code,
+                step.duration_seconds,
+                step.output,
+                step.detail or reason,
+                step.argv,
+            )
         _link_node_modules(work_copy)
         detail = f"built dependency image {tag} for {name}"
         return tag, StepResult(
             step.status, step.exit_code, step.duration_seconds, step.output, detail, step.argv
         )
+
+
+INSTALL_ATTEMPTS = 3
+"""The registry install is retried only on transient network errors (ECONNRESET, ...)."""
+_TRANSIENT = re.compile(
+    r"\b(ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|ENOTFOUND|EPIPE|socket hang up|"
+    r"network aborted|ERR_SOCKET_TIMEOUT)\b"
+)
+_NPM_ERROR_CODE = re.compile(r"npm (?:error|ERR!) code (\S+)")
+
+
+def transient_network(output: str) -> bool:
+    return bool(_TRANSIENT.search(output))
+
+
+def install_failure_reason(output: str, attempts: int) -> str:
+    """One line for the console: the npm error code, and whether it was the network."""
+    code = _NPM_ERROR_CODE.search(output)
+    tries = f" after {attempts} attempts" if attempts > 1 else ""
+    if transient_network(output):
+        what = code.group(1) if code else "network error"
+        return f"npm registry network error ({what}){tries}; re-validate to try again"
+    if code:
+        return f"npm ci failed ({code.group(1)}){tries}; see the install log"
+    return f"dependency image build failed{tries}; see the install log"
 
 
 def _link_node_modules(work_copy: Path) -> None:

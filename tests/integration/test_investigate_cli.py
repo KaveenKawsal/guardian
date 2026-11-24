@@ -2,10 +2,11 @@
 
 import pytest
 import typer
-from investigation_fakes import routes
+from investigation import routes
 from investigation_world import SCAN_ID, seed_ai_scan
 from typer.testing import CliRunner
 
+from guardian.cli import common
 from guardian.cli import investigate as cli_module
 from guardian.cli.investigate import investigate
 from guardian.core.config import GuardianSettings
@@ -37,6 +38,8 @@ def _seed(tmp_path, monkeypatch):
     data = tmp_path / "data"
     monkeypatch.setenv("GUARDIAN_DATA_DIR", str(data))
     monkeypatch.setattr(cli_module, "env_files", lambda: ())
+    # Other tests pin the shared console's width; never depend on what they left behind.
+    monkeypatch.setattr(common.console, "width", 250)
     for key in ("GROQ_API_KEY", "GOOGLE_API_KEY", "GUARDIAN_LLM_PROVIDER"):
         monkeypatch.delenv(key, raising=False)
     settings = GuardianSettings(_env_file=None, data_dir=data)

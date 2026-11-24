@@ -219,7 +219,7 @@ def test_no_structured_output_support_falls_back(world):
             raise NotImplementedError(msg)
 
     plan = plan_with_llm(case, found, world.assessments, cands, NoStructured())
-    assert plan.notes == ["ai_unavailable: unsupported"]
+    assert plan.notes == ["ai_unavailable: structured output unsupported (unsupported)"]
 
 
 def test_prompt_wraps_redacted_data_and_forbids_injection(world):

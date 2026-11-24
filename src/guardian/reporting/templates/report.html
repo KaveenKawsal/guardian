@@ -39,6 +39,11 @@
   --v-false_positive: #66717e;
   --v-needs_review: #b07800;
   --v-accepted_risk: #2f6fbf;
+  --ai: #7a4fb5;
+  --ai-bg: rgba(122, 79, 181, 0.07);
+  --ok: #1f7a4d;
+  --bad: #b3123b;
+  --warn: #a86a00;
   --font-ui: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-head: "IBM Plex Sans Condensed", "IBM Plex Sans", "Arial Narrow", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
@@ -52,7 +57,8 @@
     --sev-info: #8b9aab; --sev-unknown: #b48cf0;
     --p1: #d1294f; --p2: #d0561c; --p3: #4a6d9b; --p4: #5d6977;
     --v-confirmed: #ff4d6d; --v-false_positive: #93a2b3; --v-needs_review: #f2b632;
-    --v-accepted_risk: #6aa7ff; color-scheme: dark;
+    --v-accepted_risk: #6aa7ff; --ai: #b48cf0; --ai-bg: rgba(180, 140, 240, 0.09);
+    --ok: #4cc38a; --bad: #ff4d6d; --warn: #f2b632; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
@@ -63,7 +69,8 @@
   --sev-info: #8b9aab; --sev-unknown: #b48cf0;
   --p1: #d1294f; --p2: #d0561c; --p3: #4a6d9b; --p4: #5d6977;
   --v-confirmed: #ff4d6d; --v-false_positive: #93a2b3; --v-needs_review: #f2b632;
-  --v-accepted_risk: #6aa7ff; color-scheme: dark;
+  --v-accepted_risk: #6aa7ff; --ai: #b48cf0; --ai-bg: rgba(180, 140, 240, 0.09);
+  --ok: #4cc38a; --bad: #ff4d6d; --warn: #f2b632; color-scheme: dark;
 }
 :root[data-theme="light"] { color-scheme: light; }
 * { box-sizing: border-box; }
@@ -209,6 +216,29 @@ tr:last-child td { border-bottom: 0; }
 td.mono { font-size: 12.5px; overflow-wrap: anywhere; }
 td.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 ul.limits { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+/* Remediation: verified facts are plain cards; AI inference is dashed, tinted and labelled. */
+.legend-row { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; color: var(--muted); align-items: center; }
+.tag { display: inline-block; font: 600 10.5px var(--font-mono); letter-spacing: .05em; text-transform: uppercase; border-radius: 4px; padding: 1px 6px; border: 1px solid currentColor; white-space: nowrap; }
+.tag.verified { color: var(--ok); }
+.tag.ai { color: var(--ai); border-style: dashed; }
+.tag.bad { color: var(--bad); }
+.tag.warn { color: var(--warn); }
+.tag.ok { color: var(--ok); }
+.tag.neutral { color: var(--muted); }
+.chain-status { margin: 0; }
+.cases { display: flex; flex-direction: column; gap: 14px; }
+.case { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.case-head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
+.case-head h3 { font: 600 16px var(--font-head); letter-spacing: 0; text-transform: none; color: var(--ink); margin: 0; overflow-wrap: anywhere; }
+.case section { min-width: 0; }
+.case h4 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.ai-block { border: 1px dashed var(--ai); border-left: 4px solid var(--ai); background: var(--ai-bg); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.ai-block .who { font-size: 12px; color: var(--muted); }
+.ai-block ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.ai-block .refs { font: 11.5px var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+.facts-block { border-left: 4px solid var(--ok); padding-left: 10px; }
+td.conflict { color: var(--warn); }
+.expired { color: var(--bad); font-weight: 600; }
 footer { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
 
 @media (max-width: 720px) {
@@ -312,6 +342,17 @@ footer { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line)
     <p class="notice print-only" id="print-filter"></p>
     <ol class="findings" id="list"></ol>
     <p class="notice" id="empty" hidden>No findings match the current filters.</p>
+  </section>
+
+  <section class="section" id="remediation-section" aria-labelledby="remediation-h" hidden>
+    <h2 id="remediation-h">Remediation</h2>
+    <div class="legend-row"><span><span class="tag verified">Verified</span> established by deterministic tools or recorded human decisions</span><span><span class="tag ai">AI inference</span> interpretation by a language model; not a verified fact</span></div>
+    <p class="chain-status" id="audit-chain"></p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Case</th><th>Title</th><th>Priority</th><th>Status</th><th>Verdict</th><th>Risk before → after</th></tr></thead>
+      <tbody id="case-summary"></tbody>
+    </table></div>
+    <div class="cases" id="cases"></div>
   </section>
 
   <section class="section" id="packages-section" aria-labelledby="packages-h" hidden>
@@ -931,6 +972,173 @@ footer { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line)
   }
   if (!items.length) { var none = $("empty"); none.textContent = "No findings in this scan."; none.hidden = false; }
   if (!storage) status("Browser storage is unavailable: verdicts last until you close the page. Use Export review to keep them.");
+
+  // --- Remediation cases (schema 2). Verified facts and AI inference are rendered apart.
+  function riskNum(v) { return typeof v === "number" ? Math.round(v) : "-"; }
+  function riskChange(a, b) { return riskNum(a) + " → " + riskNum(b); }
+  function tag(cls, text) { return el("span", "tag " + cls, text); }
+  function verdictTag(v) {
+    if (!v) return el("span", "muted", "none yet");
+    return tag(v === "VERIFIED" ? "ok" : (v === "FAILED" ? "bad" : "warn"), v);
+  }
+  function caseSection(title, kind) {
+    var s = el("section"), h = el("h4", null, title);
+    if (kind === "ai") h.appendChild(tag("ai", "AI inference"));
+    else if (kind === "verified") h.appendChild(tag("verified", "Verified"));
+    s.appendChild(h);
+    return s;
+  }
+  function table(headers, rows) {
+    var wrap = el("div", "table-wrap"), t = el("table"), thead = el("thead"), hr = el("tr"), tb = el("tbody");
+    headers.forEach(function (h) { hr.appendChild(el("th", null, h)); });
+    add(thead, hr); add(t, thead, tb); wrap.appendChild(t);
+    rows.forEach(function (r) { row(tb, r); });
+    return wrap;
+  }
+  function candidateRows(list) {
+    return list.map(function (c) {
+      return [[c.id, "mono"], [c.action_type], [c.target_package || c.component, "mono"],
+        [(c.from_version || "-") + " → " + (c.to_version || "-"), "mono"], [c.semver_jump],
+        [typeof c.expected_risk_reduction === "number" ? Math.round(c.expected_risk_reduction) : "-", "num"],
+        [(c.compatibility_notes || []).join("; ")], [c.rollback, "mono"]];
+    });
+  }
+  var CAND_HEADERS = ["Candidate", "Action", "Component", "Version", "Semver", "Risk reduction", "Compatibility notes", "Rollback"];
+  function renderCase(c) {
+    var cs = c.case || {}, box = el("article", "case");
+    box.id = "case-" + String(cs.id || "").replace(/[^A-Za-z0-9_-]/g, "");
+    var head = el("div", "case-head");
+    var prio = el("span", "prio", cs.priority || "P4"); prio.style.setProperty("--pc", prioVar(cs.priority)); prio.style.padding = "2px 6px";
+    add(head, prio, el("h3", null, cs.title || "(untitled case)"), el("span", "mono muted", cs.id), tag("neutral", cs.status || "-"), verdictTag(c.verdict));
+    box.appendChild(head);
+    var dl = el("dl", "kv");
+    kv(dl, "Risk before → after", riskChange(c.risk_before, c.risk_after));
+    if (cs.jira_key) kv(dl, "Jira", c.jira_url ? link(c.jira_url, cs.jira_key) : cs.jira_key, true);
+    if (c.pull_request_url) kv(dl, "Pull request", link(c.pull_request_url));
+    kv(dl, "Fingerprint", cs.fingerprint, true);
+    kv(dl, "Updated", fmtDate(cs.updated_at));
+    box.appendChild(dl);
+
+    var fs = caseSection("Original finding(s)", "verified");
+    var fl = el("ul", "plain facts-block");
+    (c.findings || []).forEach(function (f) {
+      var li = el("li", "ev");
+      add(li, el("span", "k", f.severity), f.title || "", el("div", "meta", (f.id || "") + " · " + (f.tool || "")));
+      (f.evidence || []).forEach(function (e) {
+        var m = el("div", "meta"); add(m, "[" + e.kind + "] " + (e.summary || "") + (e.path ? " · " + e.path + (e.line ? ":" + e.line : "") : ""));
+        if (e.url) { m.appendChild(document.createTextNode(" · ")); m.appendChild(link(e.url)); }
+        li.appendChild(m);
+      });
+      fl.appendChild(li);
+    });
+    (c.missing_finding_ids || []).forEach(function (id) { fl.appendChild(el("li", "ev muted", id + " (not stored with the loaded scans)")); });
+    fs.appendChild(fl); box.appendChild(fs);
+
+    if ((c.investigations || []).length) {
+      var is = caseSection("AI investigation", "ai");
+      c.investigations.forEach(function (inv) {
+        var b = el("div", "ai-block");
+        var via = [inv.provider, inv.model].filter(Boolean).join(" / ");
+        add(b, el("div", "who", "AI inference · " + (inv.agent_label || inv.agent) + " on " + inv.subject_id + (via ? " · " + via : "")));
+        var ul = el("ul");
+        (inv.statements || []).forEach(function (st) {
+          var li = el("li"); add(li, el("b", null, st.label + ": "), st.text);
+          if ((st.evidence_refs || []).length) li.appendChild(el("div", "refs", "evidence: " + st.evidence_refs.join(", ")));
+          ul.appendChild(li);
+        });
+        b.appendChild(ul); is.appendChild(b);
+      });
+      box.appendChild(is);
+    }
+
+    var plan = c.plan;
+    var rs = caseSection("Recommended action", plan && plan.decided_by === "llm" ? "ai" : "verified");
+    var pdl = el("dl", "kv");
+    if (!plan) kv(pdl, "Plan source", "no plan recorded");
+    else if (plan.decided_by === "llm") {
+      kv(pdl, "Plan source", "AI (" + ([plan.llm_provider, plan.llm_model].filter(Boolean).join(" / ") || "model unknown") + "), chose among deterministic candidates");
+      kv(pdl, "Confidence", plan.confidence);
+    } else {
+      kv(pdl, "Plan source", "deterministic (verified)");
+      kv(pdl, "Confidence", plan.confidence);
+      kv(pdl, "Rationale", plan.rationale);
+    }
+    if (plan) kv(pdl, "Notes", plan.notes);
+    rs.appendChild(pdl);
+    if (plan && plan.decided_by === "llm") {
+      var ab = el("div", "ai-block"); add(ab, el("div", "who", "AI inference · plan rationale"), el("p", null, plan.rationale || ""));
+      ab.lastChild.style.margin = "0"; rs.appendChild(ab);
+    }
+    if (c.recommended) rs.appendChild(table(CAND_HEADERS, candidateRows([c.recommended])));
+    if ((c.alternatives || []).length) { rs.appendChild(el("h4", null, "Alternatives")); rs.appendChild(table(CAND_HEADERS, candidateRows(c.alternatives))); }
+    box.appendChild(rs);
+
+    var ds = caseSection("Human decisions", "verified");
+    if (!(c.decisions || []).length) ds.appendChild(el("p", "muted", "No human decision recorded yet; nothing was applied."));
+    else ds.appendChild(table(["Decision", "Who", "When", "Channel", "Jira", "Justification", "Expiry"], c.decisions.map(function (entry) {
+      var d = entry.decision || {}, kind = d.decision + (d.decline_reason ? " (" + d.decline_reason + ")" : "");
+      var exp = d.risk_acceptance_expires ? el("span", entry.expired ? "expired" : null, d.risk_acceptance_expires + (entry.expired ? " (expired)" : "")) : "-";
+      var jira = entry.jira_key ? (entry.jira_url ? link(entry.jira_url, entry.jira_key) : el("span", "mono", entry.jira_key)) : "-";
+      return [[kind], [(d.actor_display || "") + " (" + (d.actor_id || "") + ")"], [fmtDate(d.decided_at)], [d.channel], [jira], [d.justification], [exp]];
+    })));
+    if (c.accepted_risk) {
+      var ar = c.accepted_risk, p = el("p");
+      add(p, el("b", null, "Accepted risk"), " until " + ar.expires + " ", ar.expired ? tag("bad", "expired") : tag("ok", "active"), " · " + (ar.actor_display || "") + ": " + (ar.justification || ""));
+      ds.appendChild(p);
+    }
+    box.appendChild(ds);
+
+    if ((c.validations || []).length) {
+      var vs = caseSection("Validation runs", "verified");
+      c.validations.forEach(function (v, i) {
+        var tests = typeof v.tests_discovered === "number" ? " · tests " + (v.tests_passed || 0) + " passed, " + (v.tests_failed || 0) + " failed of " + v.tests_discovered : "";
+        vs.appendChild(el("p", "muted", "Run " + (i + 1) + " · branch " + v.branch + " · sandbox " + v.sandbox + " · " + fmtDate(v.started_at) + tests));
+        vs.appendChild(table(["Step", "Status", "Exit code", "Duration", "Note"], (v.steps || []).map(function (st) {
+          var note = [st.known_conflict ? "fix conflicts with intentional challenge code" : "", st.detail || ""].filter(Boolean).join("; ");
+          return [[st.name], [st.status], [st.exit_code, "num"], [Number(st.duration_seconds || 0).toFixed(1) + "s", "num"], [note, st.known_conflict ? "conflict" : null]];
+        })));
+      });
+      box.appendChild(vs);
+    }
+
+    if ((c.verifications || []).length) {
+      var ver = caseSection("Verification", "verified");
+      c.verifications.forEach(function (r) {
+        var vdl = el("dl", "kv"), diff = r.sbom_diff || {};
+        kv(vdl, "Verdict", verdictTag(r.status));
+        kv(vdl, "Confidence", r.confidence);
+        kv(vdl, "Risk before → after", riskChange(r.risk_before, r.risk_after));
+        kv(vdl, "Rescan", r.after_scan_id, true);
+        kv(vdl, "Reasons", (r.reasons || []).join(" · "));
+        kv(vdl, "Findings resolved", (r.target_findings_resolved || []).join(", ") || "none", true);
+        kv(vdl, "Still present", (r.findings_still_present || []).join(", ") || "none", true);
+        kv(vdl, "New findings", (r.new_findings || []).join(", ") || "none", true);
+        kv(vdl, "SBOM added", (diff.added || []).join(", ") || "none", true);
+        kv(vdl, "SBOM removed", (diff.removed || []).join(", ") || "none", true);
+        kv(vdl, "SBOM changed", (diff.changed || []).map(function (ch) { return ch.purl_base + " " + (ch.from_version || "-") + " → " + (ch.to_version || "-"); }).join(", ") || "none", true);
+        ver.appendChild(vdl);
+      });
+      box.appendChild(ver);
+    }
+
+    var au = caseSection("Audit trail", "verified");
+    au.appendChild(table(["#", "At", "Event", "Actor", "Event hash"], (c.audit || []).map(function (e) {
+      return [[e.id, "num"], [fmtDate(e.at)], [e.event, "mono"], [e.actor], [String(e.event_sha256 || "").slice(0, 12), "mono"]];
+    })));
+    box.appendChild(au);
+    return box;
+  }
+  if (R.remediation && Array.isArray(R.remediation.cases) && R.remediation.cases.length) {
+    $("remediation-section").hidden = false;
+    var chain = R.remediation.audit_chain || {}, cst = $("audit-chain");
+    add(cst, el("b", null, "Audit log: "), chain.ok ? tag("ok", "intact") : tag("bad", "broken"),
+      " " + (chain.events || 0) + " events" + (chain.ok ? ", hash chain verified." : ": " + (chain.problems || []).slice(0, 5).join("; ")));
+    R.remediation.cases.forEach(function (c) {
+      var cs = c.case || {};
+      row($("case-summary"), [[cs.id, "mono"], [cs.title], [cs.priority], [cs.status], [verdictTag(c.verdict)], [riskChange(c.risk_before, c.risk_after), "mono"]]);
+      $("cases").appendChild(renderCase(c));
+    });
+  }
 
   // --- Theme.
   var THEMES = ["auto", "light", "dark"], theme = "auto";

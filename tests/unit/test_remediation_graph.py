@@ -35,10 +35,11 @@ ROOT = "/work/juice-shop"
 
 
 class FakeServices:
-    def __init__(self, verify_statuses=("VERIFIED",), apply_errors=()):
+    def __init__(self, verify_statuses=("VERIFIED",), apply_errors=(), pr_results=(None,)):
         self.calls: list[tuple] = []
         self.verify_statuses = list(verify_statuses)
         self.apply_errors = list(apply_errors)
+        self.pr_results = list(pr_results)
 
     def plan(self, case_id):
         self.calls.append(("plan", case_id))
@@ -68,6 +69,13 @@ class FakeServices:
         )
         self.calls.append(("verify", status))
         return {"case_id": case_id, "status": status, "reasons": [f"rescan {status}"]}
+
+    def open_pr(self, case_id, applied, verification):
+        self.calls.append(("open_pr", verification["status"]))
+        result = self.pr_results.pop(0) if len(self.pr_results) > 1 else self.pr_results[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     def record_acceptance(self, case_id, decision):
         self.calls.append(("record_acceptance", decision.decline_reason))
@@ -358,3 +366,187 @@ def test_domain_apply_failure_goes_back_to_review(tmp_path):
         assert ("notify", "failed", 1) in env.services.calls
     finally:
         env.close()
+
+
+# --- pull requests ---------------------------------------------------------------------------
+
+PR = {"url": "https://github.com/acme/juice-shop/pull/7", "number": 7, "draft": True}
+
+
+def _events(env, case_id, prefix=""):
+    return [e.event for e in env.db.audit.list(case_id) if e.event.startswith(prefix)]
+
+
+def test_verified_opens_the_pull_request_once_then_closes(tmp_path):
+    env = Env(tmp_path, FakeServices(pr_results=[PR]))
+    try:
+        case_id = _seed(env.db)
+        start_case(env.graph, case_id)
+        result = resume_case(env.graph, case_id, _decision(case_id))
+        assert result.finished
+        assert result.values["pull_request"]["url"] == PR["url"]
+        assert env.status(case_id) is CaseStatus.CLOSED
+        assert env.services.count("open_pr") == 1
+        assert ("notify", "pr_opened", 1) in env.services.calls
+        events = _events(env, case_id)
+        assert events.count("pr:opened") == 1
+        # The pull request is opened before the case is closed and reported back.
+        assert events.index("pr:opened") < events.index("status:VERIFIED->CLOSED")
+        opened = next(e for e in env.db.audit.list(case_id) if e.event == "pr:opened")
+        assert '"number":7' in opened.payload_json
+        assert env.db.audit.verify()[0]
+    finally:
+        env.close()
+
+
+class CrashAfterPr(FakeServices):
+    """Opens the pull request, then crashes in the next node (report_back's notify)."""
+
+    def __init__(self):
+        super().__init__(pr_results=[PR])
+        self.crashed = False
+
+    def notify(self, case_id, stage, payload):
+        if stage == "verified" and not self.crashed:
+            self.crashed = True
+            raise RuntimeError("process died")
+        super().notify(case_id, stage, payload)
+
+
+def test_crash_retry_and_replay_never_open_twice(tmp_path):
+    env = Env(tmp_path, CrashAfterPr())
+    try:
+        case_id = _seed(env.db)
+        start_case(env.graph, case_id)
+        with pytest.raises(RuntimeError, match="process died"):
+            resume_case(env.graph, case_id, _decision(case_id))
+        assert env.status(case_id) is CaseStatus.VERIFIED
+        result = continue_case(env.graph, case_id)
+        assert result.finished
+        assert env.services.count("open_pr") == 1
+        assert _events(env, case_id).count("pr:opened") == 1
+
+        # A replay of the node itself (crash after its audit, before its checkpoint).
+        from guardian.orchestration.remediation_graph import _Nodes
+
+        nodes = _Nodes(env.db, env.services)
+        state = {"case_id": case_id, "attempt": 1, "applied": {}, "verification": {}}
+        assert nodes.open_pr(state)["pull_request"]["url"] == PR["url"]
+        assert env.services.count("open_pr") == 1
+        assert Counter(_events(env, case_id, "graph:"))["graph:notify:pr_opened"] == 1
+    finally:
+        env.close()
+
+
+def test_pull_requests_disabled_are_skipped_silently(env, case_id):
+    start_case(env.graph, case_id)
+    result = resume_case(env.graph, case_id, _decision(case_id))
+    assert result.finished
+    assert env.services.count("open_pr") == 1  # asked; the service said "disabled"
+    assert result.values["pull_request"] is None
+    assert not _events(env, case_id, "pr:")
+    assert "graph:open_pr" not in _events(env, case_id)
+    assert env.status(case_id) is CaseStatus.CLOSED
+
+
+def test_pr_failure_is_audited_and_the_case_still_closes(tmp_path):
+    env = Env(tmp_path, FakeServices(pr_results=[GuardianError("git push rejected")]))
+    try:
+        case_id = _seed(env.db)
+        start_case(env.graph, case_id)
+        result = resume_case(env.graph, case_id, _decision(case_id))
+        assert result.finished
+        assert result.values["last_event"] == "closed"
+        assert env.status(case_id) is CaseStatus.CLOSED
+        assert "status:VERIFIED->CLOSED" in env.status_events(case_id)
+        failed = [e for e in env.db.audit.list(case_id) if e.event == "pr:failed"]
+        assert len(failed) == 1
+        assert "git push rejected" in failed[0].payload_json
+        assert ("notify", "pr_failed", 1) in env.services.calls
+        assert ("notify", "verified", 1) in env.services.calls
+
+        from guardian.orchestration.remediation_graph import _Nodes
+
+        replay = _Nodes(env.db, env.services).open_pr({"case_id": case_id, "attempt": 1})
+        assert replay["last_event"] == "pr_failed"
+        assert env.services.count("open_pr") == 1
+        assert _events(env, case_id).count("pr:failed") == 1
+    finally:
+        env.close()
+
+
+def test_failed_verdict_never_opens_a_pull_request(tmp_path):
+    env = Env(tmp_path, FakeServices(verify_statuses=("FAILED",), pr_results=[PR]))
+    try:
+        case_id = _seed(env.db)
+        start_case(env.graph, case_id)
+        result = resume_case(env.graph, case_id, _decision(case_id))
+        assert result.interrupt is not None
+        assert env.services.count("open_pr") == 0
+        assert not _events(env, case_id, "pr:")
+    finally:
+        env.close()
+
+
+def test_decline_never_opens_a_pull_request(env, case_id):
+    start_case(env.graph, case_id)
+    decline = _decision(
+        case_id, DecisionType.DECLINE, decline_reason=DeclineReason.WONT_FIX, comment="10009"
+    )
+    assert resume_case(env.graph, case_id, decline).finished
+    assert env.services.count("open_pr") == 0
+
+
+def test_thread_paused_by_the_previous_graph_shape_resumes(tmp_path):
+    """A thread created (and paused at await_decision) by the graph without open_pr resumes
+    under the current graph and runs the new node."""
+    from langgraph.graph import END, START, StateGraph
+
+    from guardian.orchestration import remediation_graph as rg
+    from guardian.orchestration.state import RemediationState
+
+    services = FakeServices(pr_results=[PR])
+    with Database(tmp_path / "guardian.db") as db:
+        case_id = _seed(db)
+        with open_checkpointer(checkpoint_path(tmp_path / "data")) as saver:
+            nodes = rg._Nodes(db, services)
+            old = StateGraph(RemediationState)
+            for name in (
+                "plan",
+                "publish_jira",
+                "await_decision",
+                "apply",
+                "validate",
+                "rescan_verify",
+                "publish_failure",
+                "record_acceptance",
+                "report_back",
+            ):
+                old.add_node(name, getattr(nodes, name))
+            old.add_edge(START, "plan")
+            old.add_edge("plan", "publish_jira")
+            old.add_edge("publish_jira", "await_decision")
+            old.add_conditional_edges(
+                "await_decision", rg._after_decision, ["apply", "record_acceptance"]
+            )
+            old.add_conditional_edges("apply", rg._after_apply, ["validate", "publish_failure"])
+            old.add_conditional_edges(
+                "validate", rg._after_validate, ["rescan_verify", "publish_failure"]
+            )
+            old.add_conditional_edges(
+                "rescan_verify",
+                lambda s: "report_back" if s.get("last_event") == "verified" else "publish_failure",
+                ["report_back", "publish_failure"],
+            )
+            old.add_edge("publish_failure", "await_decision")
+            old.add_edge("record_acceptance", "report_back")
+            old.add_edge("report_back", END)
+            assert start_case(old.compile(checkpointer=saver), case_id) is not None
+
+        with open_checkpointer(checkpoint_path(tmp_path / "data")) as saver:
+            graph = build_remediation_graph(db, services, saver)
+            assert pending_cases(graph, [case_id]) == [case_id]
+            result = resume_case(graph, case_id, _decision(case_id))
+        assert result.finished
+        assert services.count("open_pr") == 1
+        assert db.remediation.get(case_id).status is CaseStatus.CLOSED

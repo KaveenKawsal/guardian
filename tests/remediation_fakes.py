@@ -53,6 +53,7 @@ class FakeRunner:
         self.handler = handler
         self.available = available
         self.calls: list[tuple[str, list[str], Path, float | None]] = []
+        self.envs: list[dict[str, str] | None] = []
 
     def is_available(self, tool: str) -> bool:
         return self.available is None or tool in self.available
@@ -60,6 +61,7 @@ class FakeRunner:
     def run(self, tool, args, *, cwd, timeout_seconds=None, env=None):
         args = list(args)
         self.calls.append((tool, args, Path(cwd), timeout_seconds))
+        self.envs.append(dict(env) if env is not None else None)
         if self.handler is None:
             return ok(tool, args)
         return self.handler(tool, args, Path(cwd))
@@ -354,6 +356,9 @@ class StubServices:
         )
         self.calls.append(("verify", status))
         return {"case_id": case_id, "status": status, "reasons": [f"rescan {status}"]}
+
+    def open_pr(self, case_id, applied, verification):
+        self.calls.append(("open_pr", case_id))
 
     def record_acceptance(self, case_id, decision):
         self.calls.append(("record_acceptance", decision.decline_reason))

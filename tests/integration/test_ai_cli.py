@@ -209,3 +209,24 @@ def test_use_rejects_unsafe_model(workspace):
 def test_tracebacks_hide_locals():
     assert app.pretty_exceptions_show_locals is False
     assert ai_cli.ai_app.pretty_exceptions_show_locals is False
+
+
+def test_status_shows_masked_key_pools_and_pacing(workspace):
+    home_env, local_env = workspace
+    write_home(
+        home_env,
+        f"GROQ_API_KEY={GROQ_KEY}\nGROQ_API_KEY_BACKUP_1=gsk_backup_key_0000bk01\n"
+        "GROQ_API_KEY_BACKUP_2=gsk_backup_key_0000bk02\n",
+    )
+    local_env.write_text(
+        f"GOOGLE_API_KEY_BACKUP_1={GOOGLE_KEY}\nGUARDIAN_GROQ_TOKENS_PER_MINUTE=6000\n"
+    )
+    result = cli.invoke(app, ["ai", "status"])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    for secret in (GROQ_KEY, "gsk_backup_key_0000bk01", "gsk_backup_key_0000bk02", GOOGLE_KEY):
+        assert secret not in result.output
+    assert "#0 GROQ_API_KEY ...wxyz, #1 GROQ_API_KEY_BACKUP_1 ...bk01" in flat
+    assert "#0 GOOGLE_API_KEY_BACKUP_1 ...qrst" in flat
+    assert "6000 tokens/min" in flat
+    assert "same organization share one limit" in flat

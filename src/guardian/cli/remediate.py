@@ -15,6 +15,7 @@ from guardian.cli.common import cli_errors, console, err_console, open_database
 from guardian.core.config import GuardianSettings
 from guardian.core.models import Priority
 from guardian.core.remediation_models import (
+    AuditEvent,
     CaseStatus,
     RemediationActionType,
     RemediationCandidate,
@@ -23,6 +24,7 @@ from guardian.core.remediation_models import (
     ValidationRun,
     VerificationResult,
 )
+from guardian.integrations.github.records import pull_request_of
 from guardian.remediation.cases import REFRESHABLE, create_cases
 from guardian.remediation.registry import NpmRegistry
 from guardian.remediation.runtime import start_cases
@@ -293,6 +295,7 @@ def case(
             console.print(f"      {d.justification}", markup=False)
     _print_validations(validations)
     _print_verifications(verifications)
+    _print_pull_request(events)
 
     console.print("\n[bold]Audit trail[/bold]")
     table = Table(show_header=True)
@@ -308,6 +311,22 @@ def case(
             event.event_sha256[:12],
         )
     console.print(table)
+
+
+def _print_pull_request(events: list[AuditEvent]) -> None:
+    pr = pull_request_of(events)
+    if pr is None:
+        return
+    console.print("\n[bold]Pull request[/bold]")
+    if pr.get("url"):
+        kind = "draft " if pr.get("draft") else ""
+        console.print(
+            f"  {kind}#{pr.get('number')} {pr['url']} (base {pr.get('base') or '?'}); "
+            "Guardian never merges",
+            markup=False,
+        )
+    else:
+        console.print(f"  not opened: {pr.get('error')}", markup=False)
 
 
 def _print_validations(validations: list[ValidationRun]) -> None:

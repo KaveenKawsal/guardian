@@ -3,7 +3,7 @@
 import threading
 
 import pytest
-from investigation_fakes import FakeChat, good_answer, routes
+from investigation import FakeChat, good_answer, routes
 from investigation_world import SCAN_ID, SECRET, seed_ai_scan
 from pydantic import SecretStr
 
@@ -306,13 +306,14 @@ def test_provider_error_falls_back_to_other_provider(plan):
     good = FakeChat()
     runner = AgentRunner(
         {"fast": [ModelRoute("groq", "g", broken), ModelRoute("google", "m", good)], "deep": []},
-        Budget(100),  # the fallback provider's call uses the unreserved spare
+        Budget(100),  # the provider fallback is part of the same logical call: one slot
     )
     runner.budget.reserve(plan.call_order())
     report = runner.run(plan.input_for("code", "code-login"))
     assert report.status == "ok"
     assert report.provider == "google"
     assert [c.status for c in runner.calls] == ["error", "ok"]
+    assert runner.budget.calls == 1
 
 
 def test_rate_limit_backoff(plan):
@@ -320,7 +321,7 @@ def test_rate_limit_backoff(plan):
         status_code = 429
 
     def responder(schema, text, n):
-        if n <= 2:
+        if n <= 1:
             return RateLimitError("Rate limit reached. Please try again in 1.5s.")
         return good_answer(schema, text)
 
@@ -329,7 +330,9 @@ def test_rate_limit_backoff(plan):
     runner.sleep = slept.append
     report = runner.run(plan.input_for("code", "code-login"))
     assert report.status == "ok"
-    assert slept == [2.5, 2.5]  # the provider's own retry-after, via planner.rate_limit_delay
+    assert slept == [2.5]  # the provider's own retry-after (+1s), waited once
+    assert runner.budget.calls == 1  # the rate-limited attempt did not burn a budget slot
+    assert [c.status for c in runner.calls] == ["rate_limited", "ok"]
 
 
 def test_no_routes_and_no_ai(plan):

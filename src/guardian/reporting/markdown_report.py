@@ -17,8 +17,20 @@ from guardian.core.models import (
     Priority,
     VulnerabilityDetails,
 )
+from guardian.core.remediation_models import (
+    RemediationCandidate,
+    StepStatus,
+    ValidationRun,
+    VerificationResult,
+)
 from guardian.indexing.code_retriever import CodeSnippet
-from guardian.reporting.models import ReportData, ReportFinding
+from guardian.reporting.models import (
+    RemediationCaseReport,
+    RemediationSection,
+    ReportData,
+    ReportFinding,
+    ReportInvestigation,
+)
 
 PRIORITY_LABELS = {
     Priority.P1: "act now",
@@ -122,6 +134,8 @@ def render_markdown(report: ReportData) -> str:
     out += ["", f"> {md_text(summary.headline)}", ""]
     out += _summary(report)
     out += _findings(report)
+    if report.remediation is not None:
+        out += _remediation(report.remediation)
     out += _appendix(report)
     return "\n".join(out).rstrip() + "\n"
 
@@ -379,6 +393,309 @@ def _snippet(snippet: CodeSnippet) -> list[str]:
     fence = code_fence(body)
     language = _LANG.get(PurePosixPath(snippet.path).suffix.lower(), "")
     return [caption, "", f"{fence}{language}", body, fence]
+
+
+# --- Remediation -----------------------------------------------------------------------
+
+KNOWN_CONFLICT_NOTE = "fix conflicts with intentional challenge code"
+AI_PREFIX = "AI inference:"
+
+
+def _risk_value(value: float | None) -> str:
+    return "-" if value is None else f"{value:.0f}"
+
+
+def risk_change(before: float | None, after: float | None) -> str:
+    return f"{_risk_value(before)} → {_risk_value(after)}"
+
+
+def _remediation(section: RemediationSection) -> list[str]:
+    chain = section.audit_chain
+    status = (
+        f"intact ({chain.events} events, hash chain verified)"
+        if chain.ok
+        else f"BROKEN ({len(chain.problems)} problem(s) in {chain.events} events)"
+    )
+    out = [
+        "## Remediation",
+        "",
+        (
+            "Facts below come from deterministic tools and recorded human decisions. "
+            f'Lines quoted as "{AI_PREFIX}" are AI interpretation, not verified facts.'
+        ),
+        "",
+        f"**Audit log:** {status}",
+        "",
+    ]
+    out += [f"- {md_text(problem)}" for problem in chain.problems[:20]]
+    if chain.problems:
+        out.append("")
+    out += _table(
+        ["Case", "Title", "Priority", "Status", "Verdict", "Risk before → after"],
+        [
+            [
+                md_code(c.case.id, in_table=True),
+                _cell(c.case.title),
+                c.case.priority.value,
+                c.case.status.value,
+                c.verdict.value if c.verdict else "-",
+                risk_change(c.risk_before, c.risk_after),
+            ]
+            for c in section.cases
+        ],
+    )
+    out.append("")
+    for case in section.cases:
+        out += _case(case)
+    return out
+
+
+def _case(item: RemediationCaseReport) -> list[str]:
+    case = item.case
+    jira = "-"
+    if case.jira_key:
+        jira = md_code(case.jira_key) + (f" {md_url(item.jira_url)}" if item.jira_url else "")
+    out = [
+        f"### {md_code(case.id)} · {md_text(case.title)}",
+        "",
+        (
+            f"**Priority** {case.priority.value} · **Status** {case.status.value} · "
+            f"**Verdict** {item.verdict.value if item.verdict else 'none yet'} · "
+            f"**Risk** {risk_change(item.risk_before, item.risk_after)} · **Jira** {jira}"
+        ),
+        "",
+        "#### Original finding(s) (verified)",
+        "",
+    ]
+    for finding in item.findings:
+        out.append(
+            f"- {md_text(finding.title)} · {finding.severity.value} · {md_code(finding.id)} "
+            f"({md_text(finding.tool)})"
+        )
+        out += [f"  - {_evidence(e)}" for e in finding.evidence]
+    out += [f"- {md_code(f)} (not stored with the loaded scans)" for f in item.missing_finding_ids]
+    if not item.findings and not item.missing_finding_ids:
+        out.append("- No findings recorded.")
+    out.append("")
+    if item.investigations:
+        out += ["#### AI investigation", ""]
+        for inv in item.investigations:
+            out += _investigation(inv)
+    out += _recommendation(item)
+    out += _decisions(item)
+    out += _validations(item.validations)
+    out += _verifications(item.verifications)
+    if item.pull_request_url:
+        out += ["#### Pull request", "", f"- {md_url(item.pull_request_url)}", ""]
+    out += ["#### Audit trail", ""]
+    out += _table(
+        ["#", "At", "Event", "Actor", "Event hash"],
+        [
+            [
+                "-" if e.id is None else str(e.id),
+                e.at.isoformat(timespec="seconds"),
+                md_code(e.event, in_table=True),
+                _cell(e.actor),
+                md_code(e.event_sha256[:12], in_table=True),
+            ]
+            for e in item.audit
+        ],
+    )
+    out.append("")
+    return out
+
+
+def _investigation(inv: ReportInvestigation) -> list[str]:
+    via = " / ".join(md_text(v) for v in (inv.provider, inv.model) if v)
+    head = f"> {AI_PREFIX} **{md_text(inv.agent_label)}** on {md_code(inv.subject_id)}"
+    out = [head + (f" ({via})" if via else ""), ">"]
+    for st in inv.statements:
+        refs = f" (evidence: {_joined(st.evidence_refs, md_code)})" if st.evidence_refs else ""
+        out.append(f"> - {AI_PREFIX} {md_text(st.label)}: {md_text(st.text)}{refs}")
+    return [*out, ""]
+
+
+def _candidate_row(c: RemediationCandidate) -> list[str]:
+    versions = f"{_cell(c.from_version)} → {_cell(c.to_version)}"
+    reduction = "-" if c.expected_risk_reduction is None else f"{c.expected_risk_reduction:.0f}"
+    return [
+        md_code(c.id, in_table=True),
+        c.action_type.value,
+        md_code(c.target_package or c.component, in_table=True),
+        versions,
+        c.semver_jump.value,
+        reduction,
+        _cell("; ".join(c.compatibility_notes)),
+        md_code(c.rollback, in_table=True),
+    ]
+
+
+_CANDIDATE_HEADERS = [
+    "Candidate",
+    "Action",
+    "Component",
+    "Version",
+    "Semver",
+    "Expected risk reduction",
+    "Compatibility notes",
+    "Rollback",
+]
+
+
+def _recommendation(item: RemediationCaseReport) -> list[str]:
+    out = ["#### Recommended action", ""]
+    plan = item.plan
+    if plan is None:
+        out.append("Plan source: no plan recorded.")
+    elif plan.decided_by == "llm":
+        via = " / ".join(md_text(v) for v in (plan.llm_provider, plan.llm_model) if v)
+        out += [
+            (
+                f"Plan source: AI ({via or 'model unknown'}), confidence {plan.confidence.value}. "
+                "The AI chose among deterministic candidates only."
+            ),
+            "",
+            f"> {AI_PREFIX} {md_text(plan.rationale)}",
+        ]
+    else:
+        out.append(
+            f"Plan source: deterministic (verified), confidence {plan.confidence.value}. "
+            f"Rationale: {md_text(plan.rationale)}"
+        )
+    if plan is not None:
+        out += [f"- Note: {md_text(n)}" for n in plan.notes]
+    out.append("")
+    if item.recommended is not None:
+        out += _table(_CANDIDATE_HEADERS, [_candidate_row(item.recommended)])
+        out.append("")
+    if item.alternatives:
+        out += ["**Alternatives**", ""]
+        out += _table(_CANDIDATE_HEADERS, [_candidate_row(c) for c in item.alternatives])
+        out.append("")
+    return out
+
+
+def _decisions(item: RemediationCaseReport) -> list[str]:
+    out = ["#### Human decisions", ""]
+    if not item.decisions:
+        return [*out, "No human decision recorded yet; nothing was applied.", ""]
+    rows = []
+    for entry in item.decisions:
+        d = entry.decision
+        kind = d.decision.value
+        if d.decline_reason:
+            kind += f" ({d.decline_reason.value})"
+        if d.modify:
+            kind += f" ({d.modify.kind}={md_text(getattr(d.modify, d.modify.kind))})"
+        jira = "-"
+        if entry.jira_key:
+            jira = md_code(entry.jira_key, in_table=True)
+            if entry.jira_url:
+                jira += " " + md_url(entry.jira_url)
+        expiry = "-"
+        if d.risk_acceptance_expires:
+            expiry = d.risk_acceptance_expires.isoformat() + (" EXPIRED" if entry.expired else "")
+        rows.append(
+            [
+                kind,
+                f"{md_text(d.actor_display)} ({md_code(d.actor_id, in_table=True)})",
+                d.decided_at.isoformat(timespec="seconds"),
+                d.channel,
+                jira,
+                _cell(d.justification),
+                expiry,
+            ]
+        )
+    out += _table(["Decision", "Who", "When", "Channel", "Jira", "Justification", "Expiry"], rows)
+    out.append("")
+    risk = item.accepted_risk
+    if risk is not None:
+        state = "**EXPIRED** - review again" if risk.expired else "active"
+        out += [
+            (
+                f"**Accepted risk** until {risk.expires.isoformat()} ({state}), accepted by "
+                f"{md_text(risk.actor_display)}: {md_text(risk.justification or '-')}"
+            ),
+            "",
+        ]
+    return out
+
+
+def _validations(runs: list[ValidationRun]) -> list[str]:
+    if not runs:
+        return []
+    out = ["#### Validation runs", ""]
+    for i, run in enumerate(runs, 1):
+        tests = ""
+        if run.tests_discovered is not None:
+            tests = (
+                f" · tests {run.tests_passed or 0} passed, {run.tests_failed or 0} failed of "
+                f"{run.tests_discovered}"
+            )
+        out += [
+            f"Run {i}: branch {md_code(run.branch)} · sandbox {run.sandbox} · "
+            f"started {run.started_at.isoformat(timespec='seconds')}"
+            + (f" · commit {md_code(run.commit_sha[:12])}" if run.commit_sha else "")
+            + tests,
+            "",
+        ]
+        out += _table(
+            ["Step", "Status", "Exit code", "Duration", "Note"],
+            [
+                [
+                    step.name,
+                    step.status.value.upper()
+                    if step.status is not StepStatus.PASSED
+                    else step.status.value,
+                    "-" if step.exit_code is None else str(step.exit_code),
+                    f"{step.duration_seconds:.1f}s",
+                    "; ".join(
+                        x
+                        for x in (
+                            KNOWN_CONFLICT_NOTE if step.known_conflict else "",
+                            md_text(step.detail) if step.detail else "",
+                        )
+                        if x
+                    )
+                    or "-",
+                ]
+                for step in run.steps
+            ],
+        )
+        out.append("")
+    return out
+
+
+def _verifications(results: list[VerificationResult]) -> list[str]:
+    if not results:
+        return []
+    out = ["#### Verification", ""]
+    for result in results:
+        diff = result.sbom_diff
+        out += [
+            f"**Verdict** {result.status.value} · confidence {result.confidence.value} · "
+            f"risk {risk_change(result.risk_before, result.risk_after)} · rescan "
+            + (md_code(result.after_scan_id[:12]) if result.after_scan_id else "none"),
+            "",
+        ]
+        out += [f"- Reason: {md_text(r)}" for r in result.reasons]
+        out += [
+            f"- Findings resolved: {_joined(result.target_findings_resolved, md_code) or 'none'}",
+            f"- Still present: {_joined(result.findings_still_present, md_code) or 'none'}",
+            f"- New findings: {_joined(result.new_findings, md_code) or 'none'}",
+            f"- SBOM added: {_joined(diff.added, md_code) or 'none'}",
+            f"- SBOM removed: {_joined(diff.removed, md_code) or 'none'}",
+            "- SBOM changed: "
+            + (
+                ", ".join(
+                    f"{md_code(c.purl_base)} {_cell(c.from_version)} → {_cell(c.to_version)}"
+                    for c in diff.changed
+                )
+                or "none"
+            ),
+            "",
+        ]
+    return out
 
 
 def _appendix(report: ReportData) -> list[str]:

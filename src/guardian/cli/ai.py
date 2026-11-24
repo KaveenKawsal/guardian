@@ -11,6 +11,15 @@ from guardian.core.config import LLM_PROVIDERS, GuardianSettings, LLMProvider, e
 from guardian.core.exceptions import ConfigurationError
 from guardian.llm.catalog import list_models
 from guardian.llm.envfile import target_env_file, update_env_file
+from guardian.llm.keys import (
+    MAX_BACKUP_KEYS,
+    KeySettings,
+    backup_env_var,
+    key_pool_entries,
+    load_key_settings,
+    requests_per_minute,
+    tokens_per_minute,
+)
 from guardian.llm.providers import (
     KEY_ENV_VARS,
     KEY_URLS,
@@ -58,14 +67,16 @@ ProviderOption = Annotated[
 
 @ai_app.command()
 def status() -> None:
-    """Show configured providers, masked keys, models and the settings files in use."""
+    """Show configured providers, masked keys, key pools, pacing and the settings files."""
     with cli_errors():
         settings = load_settings()
+        keys = load_key_settings()
     active = active_provider(settings)
     table = Table(title="Guardian LLM providers", title_justify="left")
     table.add_column("Provider")
     table.add_column("API key")
-    table.add_column("Model")
+    table.add_column("Keys", justify="right")
+    table.add_column("Model", no_wrap=True)
     table.add_column("Active")
     for provider in LLM_PROVIDERS:
         model = configured_model(settings, provider)
@@ -73,13 +84,16 @@ def status() -> None:
             model = f"{settings.llm_model} (GUARDIAN_LLM_MODEL)"
         key = api_key_for(settings, provider)
         key_text = mask_secret(key)
+        pool_size = len(key_pool_entries(settings, provider, keys))
         table.add_row(
             f"{PROVIDER_LABELS[provider]} ({provider})",
             f"[green]{key_text}[/green]" if key else f"[dim]{key_text}[/dim]",
+            str(pool_size),
             model,
             "[cyan]*[/cyan]" if provider == active else "",
         )
     console.print(table)
+    _print_pools(settings, keys)
 
     if not settings.ai_enabled:
         console.print("[yellow]AI is disabled (GUARDIAN_AI_ENABLED=false).[/yellow]")
@@ -98,6 +112,31 @@ def status() -> None:
         resolved = path.resolve()
         state = "[green]found[/green]" if resolved.is_file() else "[dim]not found[/dim]"
         console.print(f"  {resolved}  {state}")
+
+
+def _print_pools(settings: GuardianSettings, keys: KeySettings) -> None:
+    """Key pools in rotation order (masked) and the pacing that keeps calls under limits."""
+    console.print("Key pools (tried in order; a rate-limited key cools down and the next is used):")
+    for provider in LLM_PROVIDERS:
+        entries = key_pool_entries(settings, provider, keys)
+        listed = ", ".join(f"#{e.index} {e.env_var} {e.masked}" for e in entries) or "none"
+        console.print(f"  {PROVIDER_LABELS[provider]}: {listed}", highlight=False)
+    console.print(
+        "Pacing: "
+        + "; ".join(
+            f"{PROVIDER_LABELS[p]} {tokens_per_minute(keys, p)} tokens/min, "
+            f"{requests_per_minute(keys, p)} requests/min"
+            for p in LLM_PROVIDERS
+        )
+        + f"; longest cool-down wait {keys.llm_max_wait_seconds:g}s",
+        highlight=False,
+    )
+    console.print(
+        f"[dim]Backup keys: {backup_env_var('groq', 1)} .. "
+        f"{backup_env_var('groq', MAX_BACKUP_KEYS)}"
+        f" (same for GOOGLE_API_KEY). Groq limits apply per organization: keys from the same "
+        "organization share one limit, only keys from different accounts add capacity.[/dim]"
+    )
 
 
 @ai_app.command()

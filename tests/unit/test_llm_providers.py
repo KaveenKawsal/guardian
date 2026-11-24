@@ -426,7 +426,14 @@ def test_api_keys_not_passed_to_tools(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runner_module.shutil, "which", lambda tool: sys.executable if tool == "py" else None
     )
-    for name in ("GROQ_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GUARDIAN_GROQ_API_KEY"):
+    for name in (
+        "GROQ_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GUARDIAN_GROQ_API_KEY",
+        "GROQ_API_KEY_BACKUP_1",
+        "GOOGLE_API_KEY_BACKUP_1",
+    ):
         monkeypatch.setenv(name, GROQ_KEY)
     runner = ToolRunner(ExecutionPolicy(allowed_tools=frozenset({"py"})))
     result = runner.run(

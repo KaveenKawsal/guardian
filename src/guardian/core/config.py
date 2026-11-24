@@ -1,5 +1,6 @@
 """Runtime configuration, loaded from environment variables (``GUARDIAN_*``) and ``.env``."""
 
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -10,6 +11,8 @@ from guardian.core.models import Priority
 
 LLMProvider = Literal["groq", "google"]
 LLM_PROVIDERS: tuple[LLMProvider, ...] = ("groq", "google")
+
+_REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 
 JiraTransitionEvent = Literal["approved", "declined", "verified", "validation_failed"]
 """Case events that can move the Jira issue through its workflow (optional)."""
@@ -152,6 +155,13 @@ class GuardianSettings(BaseSettings):
     sandbox_timeout_seconds: float = Field(
         default=900.0, gt=0, description="Wall-clock limit per sandbox step (install/build/test)"
     )
+    max_parallel_fixes: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description="Fixes built, tested and rescanned at the same time (each in its own "
+        "sandbox); further accepted fixes wait for a free slot",
+    )
     npm_lockfile_generation: bool = Field(
         default=True,
         description="Generate a missing package-lock.json in the Docker sandbox before scanning",
@@ -159,6 +169,28 @@ class GuardianSettings(BaseSettings):
     unsafe_host_validation: bool = Field(
         default=False,
         description="UNSAFE: build and test on the host when Docker is unavailable",
+    )
+
+    # --- Pull requests (optional, off by default) ------------------------------------------
+    pr_enabled: bool = Field(
+        default=False,
+        description="Push guardian/fix-* and open a GitHub pull request after a VERIFIED fix",
+    )
+    pr_draft: bool = Field(default=True, description="Open pull requests as drafts")
+    pr_remote: str = Field(
+        default="origin",
+        description="Git remote of the scanned repository that names the GitHub repository",
+    )
+    pr_base: str | None = Field(
+        default=None, description="Base branch; unset uses the repository's default branch"
+    )
+    github_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "GUARDIAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "github_token"
+        ),
+        repr=False,
+        description="Token with contents:write and pull_requests:write on the repository",
     )
 
     @field_validator("llm_provider", "llm_model", mode="before")
@@ -169,7 +201,9 @@ class GuardianSettings(BaseSettings):
             return value.lower() if value and value.lower() in LLM_PROVIDERS else value or None
         return value
 
-    @field_validator("groq_api_key", "google_api_key", "jira_api_token", mode="before")
+    @field_validator(
+        "groq_api_key", "google_api_key", "jira_api_token", "github_token", mode="before"
+    )
     @classmethod
     def _blank_key_is_none(cls, value: object) -> object:
         raw = value.get_secret_value() if isinstance(value, SecretStr) else value
@@ -190,11 +224,20 @@ class GuardianSettings(BaseSettings):
                 raise ValueError(msg)
         return value
 
-    @field_validator("jira_email", "jira_project_key", mode="before")
+    @field_validator("jira_email", "jira_project_key", "pr_base", mode="before")
     @classmethod
     def _blank_text_is_none(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip() or None
+        return value
+
+    @field_validator("pr_remote", mode="after")
+    @classmethod
+    def _safe_remote_name(cls, value: str) -> str:
+        value = value.strip()
+        if not _REMOTE_NAME_RE.fullmatch(value):
+            msg = "GUARDIAN_PR_REMOTE must be a plain git remote name (letters, digits, ._-)"
+            raise ValueError(msg)
         return value
 
     @field_validator("approvers", "cli_approvers", mode="before")
