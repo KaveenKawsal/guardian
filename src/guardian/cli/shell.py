@@ -12,12 +12,15 @@ import difflib
 import shlex
 import sys
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
 import typer
 from rich.markup import escape
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from guardian import __version__
 from guardian.assistant import Assistant, ScanToolbox
@@ -147,6 +150,7 @@ class GuardianShell:
         self.settings = settings or ai_cli.load_settings()
         self.assistant = assistant or Assistant(self.settings)
         self.scan: ScanRecord | None = None
+        self.use_workspace = reader is None and sys.stdin.isatty() and sys.stdout.isatty()
         self.reader = reader or self._default_reader()
 
     # Session
@@ -158,15 +162,26 @@ class GuardianShell:
     def _default_reader(self) -> LineReader:
         if sys.stdin.isatty() and sys.stdout.isatty():
             summaries = {f"/{name}": c.summary for name, c in COMMANDS.items()}
+            summaries["/exit"] = "Exit Guardian"
             return PromptReader(self.history_path, summaries, self.toolbar)
         return PlainReader()
 
     def toolbar(self) -> str:
         repo = f"{self.scan.repository_name} | scan {self.scan.id[:12]}" if self.scan else "no scan"
-        return f" {repo} | {describe_ai(self.settings) or 'AI off'} | /help  Ctrl+D quits "
+        context = f"{repo} | {describe_ai(self.settings) or 'AI off'}"
+        context = "".join(char for char in context if char.isprintable())
+        return f" {context} | Enter send · Alt+Enter newline · Ctrl+D exit "
 
     def run(self) -> None:
         self._select_initial_scan()
+        if self.use_workspace:
+            from guardian.cli.workspace import Workspace
+
+            commands = {f"/{name}": command.summary for name, command in COMMANDS.items()}
+            commands["/exit"] = "Exit Guardian"
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            Workspace(self, commands).run()
+            return
         self.banner()
         while True:
             try:
@@ -233,6 +248,25 @@ class GuardianShell:
     # Display
 
     def banner(self) -> None:
+        if isinstance(self.reader, PromptReader):
+            context = (
+                f"{self.scan.repository_name} · {self._scan_line()}"
+                if self.scan else "No scan selected"
+            )
+            body = Text()
+            body.append(context + "\n")
+            body.append((describe_ai(self.settings) or "AI off") + "\n", style="dim")
+            body.append("\n/scan", style="bold cyan")
+            body.append("  Analyze a repository     ")
+            body.append("/history", style="bold cyan")
+            body.append("  Open recent scans\n")
+            body.append("/findings", style="bold cyan")
+            body.append("  Review findings           ")
+            body.append("/help", style="bold cyan")
+            body.append("  Browse commands")
+            console.print(Panel(body, title=f"Guardian {__version__}", title_align="left",
+                                border_style="cyan", expand=False))
+            return
         console.print(f"[bold cyan]Guardian[/bold cyan] {__version__}  security intelligence shell")
         if self.scan:
             console.print(
@@ -270,18 +304,22 @@ class GuardianShell:
 
     # Actions
 
+    def status(self, message: str):
+        """Let the full-screen UI own progress rendering."""
+        return nullcontext() if self.use_workspace else console.status(message)
+
     def scan_target(self, text: str, ref: str | None = None) -> None:
         settings = self.settings
         source = resolve_target(text, ref)
         if isinstance(source, RemoteTarget):
-            with console.status(f"Cloning {escape(source.display)} ..."):
+            with self.status(f"Cloning {escape(source.display)} ..."):
                 path = clone(source, settings, _clone_runner(settings))
             console.print(f"Clone kept at {escape(str(path))}")
         else:
             path = source.path
         with (
             open_database(settings) as db,
-            console.status(f"Scanning {escape(str(path.resolve()))} ..."),
+            self.status(f"Scanning {escape(str(path.resolve()))} ..."),
         ):
             outcome = ScanPipeline(db, settings).run(path)
         render_scan(outcome)
@@ -439,7 +477,7 @@ def _cmd_report(shell: GuardianShell, args: list[str]) -> None:
         msg = f"unknown report format; choose from {choices}"
         raise ShellUsageError(msg) from None
     output = Path(str(options.get("output", REPORT_DIR)))
-    with open_database(shell.settings) as db, console.status("Building report ..."):
+    with open_database(shell.settings) as db, shell.status("Building report ..."):
         report = build_report(db, shell.scan_id, shell.settings)
     paths = write_reports(report, output, list(dict.fromkeys(formats)))
     for path in paths:
