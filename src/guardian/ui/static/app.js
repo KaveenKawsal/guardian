@@ -221,7 +221,7 @@
           h(
             "button",
             { class: "case-button", type: "button", onclick: () => select(c.id) },
-            h("span", { class: "case-title", text: c.title }),
+            h("span", { class: "case-title", title: c.title, text: c.title }),
             h(
               "span",
               { class: "case-meta" },
